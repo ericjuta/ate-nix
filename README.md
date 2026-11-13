@@ -86,9 +86,10 @@ Proven on 2026-11-13 on a single-node kind cluster (Kubernetes v1.37.0, gVisor w
 - **Suspend and resume work.** A counter in the actor's writable layer continued after `kubectl ate suspend actor`.
 - **Substitution works.** Two paths that were not on the node (`darkhttpd`, `static-web-server`) were fetched from `cache.nixos.org`, signature-checked by the daemon, and booted in about 4 and 11 seconds.
 - **A path no cache has fails cleanly.** The template reports `GoldenActorCrashed ... there is no substituter that can build it`.
+- **A private cache is taken only when a trusted key signed the path.** `kind/private-cache.sh` publishes three private images in a local binary cache. The one signed with the key in the node's `trusted-public-keys` booted and is in the node's store with that signature. The unsigned one and the one signed with a key the node does not trust were refused with the same `no substituter` error and never reached the node's store.
 - **OCI still works** next to it: the upstream counter demo ran on the same patched atelet.
 
-Not proven: microVM workers (this host has no KVM), more than one node, view garbage collection over time, and a private signed cache (the test used `cache.nixos.org` and its key).
+Not proven: microVM workers (this host has no KVM), more than one node, view garbage collection over time, and a cache that needs credentials (the private cache in the test was plain HTTP without authentication).
 
 ### What this does not cover
 
