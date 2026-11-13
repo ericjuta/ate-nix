@@ -71,7 +71,7 @@ gofmt -l internal/niximage internal/nixref cmd/atelet internal/resources
 go vet ./internal/niximage/ ./internal/nixref/ ./internal/resources/ ./cmd/atelet/
 go test ./internal/niximage/ ./internal/nixref/ ./internal/resources/ ./internal/imagecache/
 git commit -a --amend
-git format-patch -1 --stdout > /path/to/ate-nix/patches/substrate/0001-atelet-nix-image-source.patch
+git format-patch -1 --no-signature --stdout > /path/to/ate-nix/patches/substrate/0001-atelet-nix-image-source.patch
 ```
 
 For a move to a new upstream commit, apply the patch at the old pin, then `git rebase` the commit onto the new one and solve the conflicts there.
