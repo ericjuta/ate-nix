@@ -1,6 +1,6 @@
 # Node side of the Nix image source: the view directory atelet hard-links
 # closures into, exposed to the worker pods through the /var/lib/ate mount
-# they already have. See README.md, "Node setup".
+# they already have. See docs/operating.md, "Prepare each node".
 { config, lib, ... }:
 
 let
