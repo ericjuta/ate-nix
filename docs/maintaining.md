@@ -5,7 +5,7 @@ How the repository is laid out, how to move it to a new upstream release, and ho
 ## Layout
 
 ```text
-flake.nix                 outputs: packages, overlay, NixOS module
+flake.nix                 outputs: packages, checks, overlay, NixOS module
 pkgs/
   ate-env.nix             env binaries: upstream pin + patches/env
   ate-substrate.nix       atelet and ateapi: upstream pin + patches/substrate
@@ -16,6 +16,7 @@ patches/
   substrate/              applied to agent-substrate/substrate
 modules/ate-node.nix      NixOS module for a node
 kind/                     local proof: cluster patch, node setup, checks
+examples/reference/       a project that uses this flake: dev shell, app, two images
 docs/                     this documentation
 ```
 
@@ -85,12 +86,12 @@ Rules:
 ## Before you send a change
 
 ```sh
-nix flake check --no-build
-nix build .#ate-env .#ate-substrate
-sh -n kind/node-setup.sh && bash -n kind/prove.sh kind/private-cache.sh
+nix flake check -L
+(cd examples/reference && nix flake check -L)
 ```
 
-CI (`.github/workflows/ci.yml`) runs these checks on each pull request, plus ShellCheck and a build of all images, on `x86_64-linux` and `aarch64-linux`. CI does not start a cluster.
+The first command builds every check of the flake for your system: both packages with their Go tests, all images, ShellCheck on the `kind/` scripts, and an evaluation of the NixOS module. The second does the same for the reference project.
+CI (`.github/workflows/ci.yml`) runs both on each pull request, on `x86_64-linux` and `aarch64-linux`. CI does not start a cluster.
 
 - A change to the substrate patch needs the local proof (`kind/prove.sh`, `kind/private-cache.sh`). If you did not run it, say so.
 - Update [proof.md](proof.md) only with results that you saw. Put all other items in "Not proven".

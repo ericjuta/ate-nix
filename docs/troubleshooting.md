@@ -12,6 +12,7 @@
 | --- | --- | --- |
 | The API rejects a template with a `nix:` image when you create it. | The cluster runs the upstream `ateapi`, which requires an OCI digest. | Deploy the patched `ateapi`. See [operating.md](operating.md), step 2. |
 | `nix image reference "...": want nix:/nix/store/<hash>-<name>` | The reference is not a store path directly under `/nix/store`. | Use the full store path of the image root, with its 32-character hash. Do not point at a file inside it. |
+| `nix image reference "..." names a derivation (.drv), not a built store path` | The reference is the build recipe, not the build result. A node never builds. | Use the path that `nix build --print-out-paths` prints. It does not end in `.drv`. |
 | `image "..." is a nix store path, but nix images are not enabled on this node (--nix-view-dir)` | atelet on that node runs without `--nix-view-dir`. | Apply the atelet arguments ([operating.md](operating.md), step 3), or send the template to a worker pool on nodes that have Nix. |
 | `no binary cache configured on this node has /nix/store/...` | No cache in the node's `substituters` has the path. | Put the closure into your cache (`nix copy --to <cache> <path>`). Check with `nix path-info --store <cache> <path>`. |
 | `no binary cache this node could reach has /nix/store/...` | The same, but at least one cache did not answer. The `unable to download` warnings from Nix that follow name it. | Make the cache reachable from the node, or put the closure into a cache that is. |
@@ -27,7 +28,7 @@
 | What you see | Cause | What to do |
 | --- | --- | --- |
 | The upstream install fails when it pushes an image to `localhost:5001` (connection refused). | Your default `docker buildx` builder uses the `docker-container` driver. It cannot reach the local registry. | `export BUILDX_BUILDER=default` and run the install again. |
-| `kind/prove.sh` stops with `the proxy exited; is port 8017 taken?` | Another process uses the port. | Stop that process, or set `PORT` to a free port. |
+| `kind/prove.sh` stops with `the proxy exited; is port 8017 taken?` (or 8018) | Another process uses the port. The script uses `PORT` and `PORT` plus one. | Stop that process, or set `PORT` so that both ports are free. |
 | `kubectl ate proxy actor` fails with `no such host`. | The port argument has the wrong form. | Use `<local port>:<actor port>`, for example `kubectl ate proxy actor <name> 8017:80 -a <atespace>`. |
 | A template seems to ignore your change. | Templates cannot be changed. | Create a template with a new name. |
 

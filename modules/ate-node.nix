@@ -60,6 +60,7 @@ in
 
     fileSystems.${cfg.mountDir} = {
       device = cfg.viewDir;
+      fsType = "none";
       options = [ "bind" ];
     };
 

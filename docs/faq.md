@@ -28,7 +28,7 @@ No. The node only downloads built, signed paths. If no trusted cache has a path,
 The node's Nix configuration. A template cannot add a cache or a key.
 
 **Can an agent install packages while it runs?**
-Not into its image. The store is read-only inside the actor. The agent can write to its private layer, for example to its home directory.
+Not into its image. The image under the actor is read-only. What the agent writes, under `/nix/store` too, goes to the actor's private layer. It does not reach the node's store, the image, or another actor. The actor has no Nix daemon, so `nix build` and `nix-env` do not work there.
 
 **What happens to a suspended actor's image?**
 The node may delete the view when no actor on that node uses it. When the actor resumes, the node downloads the closure again if necessary. Keep the closure in your cache while the actor exists.

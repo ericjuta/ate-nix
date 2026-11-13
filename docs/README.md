@@ -23,6 +23,7 @@ This project is not affiliated with Agent Substrate. It is experimental: read [p
 | Understand how a Nix image becomes a running actor, and build one | [nix-images.md](nix-images.md) |
 | Run it on your own cluster | [operating.md](operating.md) |
 | See it work on a local throwaway cluster | [../kind/README.md](../kind/README.md) |
+| Start your own project on top of it | [../examples/reference/README.md](../examples/reference/README.md) |
 | Use the remote terminal | [pty.md](pty.md) |
 | Know what is tested and what is not | [proof.md](proof.md) |
 | Fix an error | [troubleshooting.md](troubleshooting.md) |

@@ -14,7 +14,7 @@ Two patch sets on top of pinned upstream releases, packaged as a Nix flake. No f
 
 A container image is a stack of layers in a registry. Each node pulls and unpacks the layers, and one changed file means a new image.
 
-A Nix image is a store path whose name contains a hash of its content. You build it ahead of time and push it to a binary cache.
+A Nix image is a store path whose name contains a hash of its build inputs. You build it ahead of time and push it to a binary cache.
 A node downloads only the packages that it does not have, checks their signatures against the keys that it trusts, and shows the actor exactly that set of packages. Two images that contain the same package share its files on disk.
 
 ```yaml
@@ -53,6 +53,7 @@ New here? Start with [docs/README.md](docs/README.md).
 | [Nix images](docs/nix-images.md) | How a store path becomes a running actor. Build and publish an image. |
 | [Run it on your cluster](docs/operating.md) | Node setup, the two patched components, trust. |
 | [Proof on kind](kind/README.md) | The full local proof, step by step. |
+| [Reference project](examples/reference/README.md) | A dev shell, an app, an agent image and a runtime image from one lock file. |
 | [PTY streams](docs/pty.md) | The remote terminal. |
 | [What is proven](docs/proof.md) | Tested and not tested. |
 | [Troubleshooting](docs/troubleshooting.md) | Errors, causes, fixes. |

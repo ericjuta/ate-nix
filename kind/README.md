@@ -64,11 +64,14 @@ kind/prove.sh
 
 ```text
 == worker pool
-== template from nix:/nix/store/ih3jm9l6cvyxl0iq5jcr513pqdv3qhzb-ate-proof-image
+== template from nix:/nix/store/gib7cf9ahddb75mi25s30hwrmy55yffx-ate-proof-image
 == actor
-   actor sees 8 store paths; the node has 1861
+   actor sees 10 store paths; the node has 3749
+== store writes
+   uid 0: append refused, replace done, create done; the actor now reads 'tampered'
+   node store, view and a second actor: unchanged
 == suspend, resume
-   counter 3 -> 5
+   counter 2 -> 4
 PASS
 ```
 

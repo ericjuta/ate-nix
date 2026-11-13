@@ -23,9 +23,8 @@ Thank you for your help. This project is small and experimental, so the rules ar
 Run these before you open a pull request. CI runs them too.
 
 ```sh
-nix flake check --no-build
-nix build .#ate-env .#ate-substrate
-sh -n kind/node-setup.sh && bash -n kind/prove.sh kind/private-cache.sh
+nix flake check -L
+(cd examples/reference && nix flake check -L)
 ```
 
 No Nix on your machine? [docs/getting-started.md](docs/getting-started.md) shows the Docker form of these commands.

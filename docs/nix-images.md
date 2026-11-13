@@ -15,8 +15,9 @@ nix:/nix/store/<hash>-<name>
 ```
 
 - `<hash>` is the 32-character Nix hash. `<name>` is the package name.
+- The path must be a build result. A derivation (a path that ends in `.drv`) is refused: a node downloads images and never builds them.
 - The path must be directly under `/nix/store`. A file inside a store path is not a valid reference.
-- The patched `ateapi` accepts this reference as pinned, because the hash names the content. The unpatched `ateapi` rejects it, because upstream requires an OCI digest.
+- The patched `ateapi` accepts this reference as pinned. The hash names the build inputs, and the signature that the node requires ties the path to its content. The unpatched `ateapi` rejects the reference, because upstream requires an OCI digest.
 
 OCI images continue to work on the same node, in the same cluster.
 
@@ -57,7 +58,7 @@ A second actor from the same image reuses the view. If the node already has the 
 - Empty `/proc`, `/sys`, `/dev`, `/tmp` and `/etc` if the image does not provide them.
 - A private writable layer on top, as with an OCI image. Files that the actor writes are in its snapshots.
 
-The view is read-only. An actor cannot add a package to its image at run time.
+The view is read-only. An actor cannot add a package to its image at run time. If a process in the actor writes under `/nix/store`, the write is refused or goes to the actor's private layer. The node's store and other actors do not change ([proof.md](proof.md)).
 
 ## Build an image
 
@@ -104,6 +105,7 @@ Keep each closure that a live or suspended actor uses in your cache. A suspended
 ## Cleanup on the node
 
 Each view registers a GC root, so the Nix garbage collector does not delete a closure that a view stands for.
+If atelet cannot build a view, it removes the GC root again.
 atelet removes a view and its GC root when no actor on the node uses the view and the view is older than `--image-cache-min-age`. This check runs on the same schedule as upstream's image cache cleanup (`--image-cache-gc-period`).
 After that, the node's normal `nix-collect-garbage` schedule frees the disk space.
 

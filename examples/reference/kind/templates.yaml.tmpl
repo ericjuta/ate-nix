@@ -1,0 +1,42 @@
+# Two actor templates for the pool that kind/prove.sh creates. Fill in the
+# variables with envsubst and pass each document to
+# `kubectl ate create actor-template -f -`.
+metadata:
+  atespace: ate-nix-proof
+  name: reference-runtime${SUFFIX}
+workerSelector:
+  matchLabels:
+    workload: nix-proof
+containers:
+- name: app
+  image: nix:${RUNTIME_IMAGE}
+  wakeupProbe:
+    httpGet:
+      path: /
+      port: 80
+resources:
+  limits:
+    cpuMillicores: 500
+    memoryBytes: 268435456 # 256Mi
+snapshotConfig:
+  preferredFidelity: SNAPSHOT_FIDELITY_MEMORY
+---
+metadata:
+  atespace: ate-nix-proof
+  name: reference-agent${SUFFIX}
+workerSelector:
+  matchLabels:
+    workload: nix-proof
+containers:
+- name: agent
+  image: nix:${AGENT_IMAGE}
+  wakeupProbe:
+    httpGet:
+      path: /readyz
+      port: 80
+resources:
+  limits:
+    cpuMillicores: 500
+    memoryBytes: 536870912 # 512Mi
+snapshotConfig:
+  preferredFidelity: SNAPSHOT_FIDELITY_MEMORY

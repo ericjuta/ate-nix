@@ -67,6 +67,10 @@ Check that all outputs evaluate, without a build:
 nix flake check --no-build
 ```
 
+Without `--no-build`, the same command builds and tests everything for your system. That is what CI runs.
+
+For a complete project on top of this flake (a dev shell, an app and two actor images from one lock file), see [../examples/reference/README.md](../examples/reference/README.md).
+
 ## Use it from your own flake
 
 ```nix
