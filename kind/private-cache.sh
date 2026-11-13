@@ -5,8 +5,10 @@
 # Builds three images no public cache has, publishes them in a local binary
 # cache (one signed with a key the node trusts, one unsigned, one signed with
 # a key the node does not trust), removes them from the node's store, and
-# creates a template from each. The first must boot; the other two must fail
-# and must not reach the node's store.
+# creates a template from each, and one from a store path no cache has. The
+# first must boot. The other three must fail, must not reach the node's
+# store, and the template's error must say why: no signature, an untrusted
+# key, or no cache that has the path.
 #
 #   WORKER_IMAGE=<ateworker-gvisor image> kind/private-cache.sh
 #
@@ -30,7 +32,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 run="$(date +%s)"
 cleanup() {
-  for tag in signed unsigned rogue; do
+  for tag in signed unsigned rogue missing; do
     ate delete actor-template "private-${tag}-${run}" -a ate-nix-proof >/dev/null 2>&1 || true
   done
 }
@@ -68,6 +70,9 @@ docker container inspect "${CACHE}" >/dev/null 2>&1 ||
   docker run -d --name "${CACHE}" --network kind -v "${CACHE}:/srv:ro" \
     busybox httpd -f -p 80 -h /srv >/dev/null
 paths="$(docker exec "${CACHE}" cat /srv/paths)"
+# A well-formed store path that no cache has: a run-unique hash (hex with
+# "e", which Nix's base32 lacks, swapped for "z").
+paths+=$'\n'"missing=/nix/store/$(printf '%s' "missing-${run}" | sha256sum | cut -c1-32 | tr e z)-ate-private-missing"
 public_key="$(docker exec "${CACHE}" cat /srv/trusted.pub)"
 path_of() { sed -n "s/^$1=//p" <<<"${paths}"; }
 
@@ -76,7 +81,7 @@ docker exec -i "${NODE}" env \
   SUBSTITUTERS="https://cache.nixos.org http://${CACHE}" \
   TRUSTED_PUBLIC_KEYS="cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= ${public_key}" \
   sh -s < "${HERE}/node-setup.sh" >/dev/null
-for tag in signed unsigned rogue; do
+for tag in signed unsigned rogue missing; do
   node test ! -e "$(path_of "${tag}")" || fail "$(path_of "${tag}") is still on the node"
 done
 
@@ -85,17 +90,22 @@ k -n ate-nix-proof rollout status deployment/nix-proof --timeout=180s >/dev/null
 ate get atespace ate-nix-proof >/dev/null 2>&1 || ate create atespace ate-nix-proof >/dev/null
 
 # Prints the template's status once it has a golden snapshot or an error.
+# JSON, not YAML: YAML may fold the long error message over several lines.
 settle() {
   local status
   for _ in $(seq 60); do
-    status="$(ate get actor-template "$1" -a ate-nix-proof -o yaml)"
+    status="$(ate get actor-template "$1" -a ate-nix-proof -o json)"
     grep -qE 'snapshotTime|[Ee]rror|Crashed' <<<"${status}" && break
     sleep 2
   done
   echo "${status}"
 }
+error_of() { sed -n 's/^ *"errorMessage": "\(.*\)",\{0,1\}$/\1/p' <<<"$1"; }
+# atelet puts the reason between "while realising <path>:" and nix-store's
+# own error.
+reason_of() { sed -e 's/.*while realising [^:]*: //' -e 's/; [^ ]*nix-store --realise .*//' <<<"$1"; }
 
-for tag in signed unsigned rogue; do
+for tag in signed unsigned rogue missing; do
   PROOF_IMAGE="$(path_of "${tag}")"
   export PROOF_IMAGE
   template="private-${tag}-${run}"
@@ -113,7 +123,19 @@ for tag in signed unsigned rogue; do
     ! grep -q snapshotTime <<<"${status}" || fail "the ${tag} image booted"
     node test ! -e "${PROOF_IMAGE}" || fail "the ${tag} image reached the node's store"
     echo "   refused; not in the node's store"
-    grep -E 'signature|substituter' <<<"${status}" | sed 's/^ */   /' | cut -c1-200
+    message="$(error_of "${status}")"
+    [[ -n "${message}" ]] || fail "the ${tag} template has no error message: ${status}"
+    case "${tag}" in
+      unsigned) want="binary cache http://${CACHE} has ${PROOF_IMAGE}, but it carries no signature" ;;
+      rogue) want="binary cache http://${CACHE} has ${PROOF_IMAGE}, signed only by keys this node does not trust: ate-rogue-1" ;;
+      missing) want="no binary cache configured on this node has ${PROOF_IMAGE}" ;;
+    esac
+    reason="$(reason_of "${message}")"
+    [[ "${reason}" == "${want}"* ]] || fail "the ${tag} template's error does not say why: ${message}"
+    if [[ "${tag}" == missing ]]; then
+      ! grep -qiE 'sign|trust' <<<"${message}" || fail "the missing path's error talks about signatures: ${message}"
+    fi
+    echo "   ${reason}"
   fi
 done
 

@@ -13,8 +13,8 @@ Proven on 2026-11-13 on a single-node [kind](https://kind.sigs.k8s.io) cluster: 
 | The actor sees its closure and nothing else. | 8 store paths inside the actor, exactly the output of `nix-store --query --requisites`. The node's store had 1861. |
 | Suspend and resume work. | A counter in the actor's writable layer continued after `kubectl ate suspend actor`. |
 | The node downloads what it lacks. | Two paths that were not on the node (`darkhttpd`, `static-web-server`) came from `cache.nixos.org`, passed the signature check and booted in about 4 and 11 seconds. |
-| A path that no cache has fails cleanly. | The template reports `GoldenActorCrashed ... there is no substituter that can build it`. |
-| A private cache is used only for paths that a trusted key signed. | `kind/private-cache.sh` puts three new images into a local cache. The image signed with a key in the node's `trusted-public-keys` booted, and is in the node's store with that signature. The unsigned image and the image signed with an unknown key were refused with the same `no substituter` error. Neither reached the node's store. |
+| A path that no cache has fails cleanly. | The template reports `GoldenActorCrashed ... no binary cache configured on this node has /nix/store/...`, then the Nix error `... there is no substituter that can build it`. The message does not mention signatures. |
+| A private cache is used only for paths that a trusted key signed. | `kind/private-cache.sh` puts three new images into a local cache. The image signed with a key in the node's `trusted-public-keys` booted, and is in the node's store with that signature. The unsigned image and the image signed with an unknown key were refused, and each template's error gives the cause: `binary cache http://ate-nix-cache has /nix/store/..., but it carries no signature`, and `... signed only by keys this node does not trust: ate-rogue-1`. Neither reached the node's store. |
 | OCI images still work. | The upstream counter demo ran on the same patched atelet. |
 
 Also proven, without a cluster: the Go unit tests of the patch pass, and the Nix build runs them.
