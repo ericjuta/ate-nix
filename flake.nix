@@ -23,6 +23,7 @@
         ate-env = final.callPackage ./pkgs/ate-env.nix { };
         ate-substrate = final.callPackage ./pkgs/ate-substrate.nix { };
         ateNixImage = final.callPackage ./pkgs/ate-nix-image.nix { };
+        ateImages = final.callPackage ./pkgs/ate-images.nix { };
       };
 
       nixosModules.ate-node = ./modules/ate-node.nix;
@@ -44,6 +45,53 @@
             Env = [ "PATH=/bin" ];
           };
         };
+
+        # The actor kind/prove.sh starts: an HTTP server whose /cgi-bin/info
+        # reports what the actor sees of the store, with a counter kept in
+        # the actor's writable layer.
+        proof-image =
+          let
+            pkgs = pkgsFor system;
+          in
+          pkgs.ateNixImage {
+            name = "ate-proof-image";
+            paths = [
+              pkgs.busybox
+              (pkgs.writeTextFile {
+                name = "ate-proof-www";
+                destination = "/www/cgi-bin/info";
+                executable = true;
+                text = ''
+                  #!/bin/sh
+                  n=$(cat /tmp/count 2>/dev/null || echo 0)
+                  n=$((n + 1))
+                  echo "$n" > /tmp/count
+                  echo "Content-Type: text/plain"
+                  echo
+                  echo "count=$n"
+                  echo "sh=$(readlink -f /bin/sh)"
+                  echo "store_paths=$(ls /nix/store | wc -l)"
+                  ls /nix/store | sed 's/^/store_path=/'
+                '';
+              })
+            ];
+            config = {
+              Entrypoint = [
+                "/bin/httpd"
+                "-f"
+                "-p"
+                "80"
+                "-h"
+                "/www"
+              ];
+              Env = [ "PATH=/bin" ];
+            };
+          };
+      }
+      // nixpkgs.lib.optionalAttrs (nixpkgs.lib.hasSuffix "-linux" system) {
+        # Container images of the patched binaries, as `docker load` tarballs.
+        atelet-image = (pkgsFor system).ateImages.atelet;
+        ateapi-image = (pkgsFor system).ateImages.ateapi;
       });
     };
 }

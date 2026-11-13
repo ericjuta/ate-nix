@@ -1,0 +1,20 @@
+metadata:
+  atespace: ate-nix-proof
+  name: nix-proof
+workerSelector:
+  matchLabels:
+    workload: nix-proof
+containers:
+- name: proof
+  # A Nix store path, not an OCI reference; prove.sh fills it in.
+  image: nix:${PROOF_IMAGE}
+  wakeupProbe:
+    httpGet:
+      path: /cgi-bin/info
+      port: 80
+resources:
+  limits:
+    cpuMillicores: 500
+    memoryBytes: 268435456 # 256Mi
+snapshotConfig:
+  preferredFidelity: SNAPSHOT_FIDELITY_MEMORY

@@ -41,6 +41,9 @@ Push the result to your binary cache, then use `image: nix:/nix/store/...-agent-
 
 ### Node setup
 
+Any Kubernetes node works, on any distro, as long as the node has Nix: a store, a running daemon with your cache and signing key configured, and the view directory bind-mounted under `/var/lib/ate`.
+`kind/node-setup.sh` does that with plain shell. On NixOS the module does the same:
+
 ```nix
 imports = [ inputs.ate-nix.nixosModules.ate-node ];
 services.ate-node.nixImages = {
@@ -59,14 +62,38 @@ Then run the patched `atelet` with the host's `/nix` mounted and:
 --nix-store-command=/nix/var/nix/profiles/system/sw/bin/nix-store
 ```
 
+`kind/atelet-nix.patch.json` is that change as a JSON patch for the upstream atelet DaemonSet (it uses the default-profile `nix-store` of a standard Nix install).
 Run the patched `ateapi` too, or it rejects `nix:` references.
+
+### Container images
+
+`nix build .#atelet-image` and `.#ateapi-image` build `docker load` tarballs of the two patched binaries, tagged `ate-nix/atelet:1.0.0` and `ate-nix/ateapi:1.0.0`.
+They follow the upstream ko layout (`/ko-app/<name>`), so only the image reference changes in the upstream manifests:
+
+```sh
+kubectl -n ate-system set image ds/atelet atelet=<registry>/ate-nix/atelet:1.0.0
+kubectl -n ate-system set image deploy/ate-api-server ate-api-server=<registry>/ate-nix/ateapi:1.0.0
+```
+
+The atelet image has no libc. Upstream's has glibc so that atelet can run a dynamically linked kubelet credential provider (GKE Ubuntu, AKS) for OCI pulls; on such a node, keep OCI pulls on public or pull-secret-free registries or use an image built from upstream's base.
+
+### Proof
+
+Proven on 2026-11-13 on a single-node kind cluster (Kubernetes v1.37.0, gVisor workers, Debian node with Nix 2.35.6), running the two images above. `kind/README.md` has the steps; `kind/prove.sh` is the check.
+
+- **An actor boots from a store path.** The template's golden snapshot was taken from `nix:/nix/store/...-ate-proof-image` and the actor answered HTTP through the router.
+- **The actor sees its closure and nothing else.** 8 store paths inside the actor, exactly `nix-store --query --requisites`; the node's store had 1861.
+- **Suspend and resume work.** A counter in the actor's writable layer continued after `kubectl ate suspend actor`.
+- **Substitution works.** Two paths that were not on the node (`darkhttpd`, `static-web-server`) were fetched from `cache.nixos.org`, signature-checked by the daemon, and booted in about 4 and 11 seconds.
+- **A path no cache has fails cleanly.** The template reports `GoldenActorCrashed ... there is no substituter that can build it`.
+- **OCI still works** next to it: the upstream counter demo ran on the same patched atelet.
+
+Not proven: microVM workers (this host has no KVM), more than one node, view garbage collection over time, and a private signed cache (the test used `cache.nixos.org` and its key).
 
 ### What this does not cover
 
 - **nix-snapshotter for ordinary Kubernetes pods.** That is node configuration ([pdtpartners/nix-snapshotter](https://github.com/pdtpartners/nix-snapshotter)), not a Substrate patch. The Substrate system pods themselves still ship as OCI images.
-- **Container images of the patched binaries.** `ate-substrate` builds `atelet` and `ateapi`; putting them into your cluster's atelet DaemonSet and ateapi Deployment is deployment-specific.
 - **Agents adding tools at runtime** (a writable store view). The store is read-only inside the actor.
-- **Proof on a cluster.** The patch is proven by unit tests and by building; no actor has been started from a Nix image yet.
 
 ## PTY streams (`ate-env`)
 

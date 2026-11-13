@@ -1,0 +1,12 @@
+[
+  { "op": "add", "path": "/spec/template/spec/volumes/-",
+    "value": { "name": "nix", "hostPath": { "path": "/nix", "type": "Directory" } } },
+  { "op": "add", "path": "/spec/template/spec/containers/0/volumeMounts/-",
+    "value": { "name": "nix", "mountPath": "/nix" } },
+  { "op": "add", "path": "/spec/template/spec/containers/0/args/-",
+    "value": "--nix-view-dir=/nix/var/ate/views" },
+  { "op": "add", "path": "/spec/template/spec/containers/0/args/-",
+    "value": "--nix-view-mount-dir=/var/lib/ate/nix-views" },
+  { "op": "add", "path": "/spec/template/spec/containers/0/args/-",
+    "value": "--nix-store-command=/nix/var/nix/profiles/default/bin/nix-store" }
+]

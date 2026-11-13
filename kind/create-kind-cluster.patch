@@ -1,0 +1,14 @@
+diff --git a/hack/create-kind-cluster.sh b/hack/create-kind-cluster.sh
+index b3b25db2..c8dc6ca3 100755
+--- a/hack/create-kind-cluster.sh
++++ b/hack/create-kind-cluster.sh
+@@ -91,6 +91,9 @@ kind: Cluster
+ apiVersion: kind.x-k8s.io/v1alpha4
+ nodes:
+ - role: control-plane
++  extraMounts:
++  - hostPath: /var/lib/docker/volumes/ate-nix-store/_data
++    containerPath: /nix
+ EOF
+ if [ "${HAS_KVM}" = "1" ]; then
+   cat <<EOF >> "${ROOT}/bin/kind-config.yaml"
