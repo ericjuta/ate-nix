@@ -103,8 +103,16 @@ TRUSTED_PUBLIC_KEYS="cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDSh
 == missing: nix:/nix/store/a2937z795264b34300ba7661dd342101-ate-private-missing
    refused; not in the node's store
    no binary cache configured on this node has /nix/store/a2937z795264b34300ba7661dd342101-ate-private-missing
+== revoke: the node stops trusting ate-proof-1
+   the image the node already has still boots
+   atelet: removed view mzdqh638x5z7lv167b59skx9s34q9khv-ate-private-signed
+   atelet: revoked /nix/store/mzdqh638x5z7lv167b59skx9s34q9khv-ate-private-signed
+   after atelet --nix-revoke: refused; not in the node's store
+   binary cache http://ate-nix-cache has /nix/store/mzdqh638x5z7lv167b59skx9s34q9khv-ate-private-signed, signed only by keys this node does not trust: ate-proof-1 (the node takes only paths signed by a key in its trusted-public-keys)
 PASS
 ```
+
+The last block is revocation. The script takes the first key away from the node. The signed image is already on the node, so it still boots. `atelet --nix-revoke` removes it from the node, and after that the node refuses it. [../docs/operating.md](../docs/operating.md) has the procedure for a real cluster.
 
 ## Teardown
 

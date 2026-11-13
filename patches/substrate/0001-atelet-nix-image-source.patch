@@ -1,4 +1,4 @@
-From f7339a3fb96bc76bb52687e0242c01c69ff3d3ac Mon Sep 17 00:00:00 2001
+From 4d03756038433cf0715e5aeadc8e715b02230887 Mon Sep 17 00:00:00 2001
 From: Eric Juta <ericjohnjuta@gmail.com>
 Date: Fri, 13 Nov 2026 11:13:28 +0000
 Subject: [PATCH] atelet: run actors from Nix store paths
@@ -22,19 +22,19 @@ nix-store error atelet returns has the userinfo and query of each URL
 redacted.
 ---
  cmd/atelet/imagevolume_test.go      |   6 +-
- cmd/atelet/main.go                  |  12 +-
- cmd/atelet/niximages.go             |  92 +++++
+ cmd/atelet/main.go                  |  19 +-
+ cmd/atelet/niximages.go             | 115 +++++
  cmd/atelet/oci.go                   |  55 ++-
- docs/guides/nix-images.md           | 159 ++++++++
- internal/niximage/niximage.go       | 599 ++++++++++++++++++++++++++++
- internal/niximage/niximage_test.go  | 334 ++++++++++++++++
- internal/niximage/refusal.go        | 241 +++++++++++
- internal/niximage/refusal_test.go   | 212 ++++++++++
- internal/nixref/nixref.go           |  70 ++++
+ docs/guides/nix-images.md           | 182 ++++++++
+ internal/niximage/niximage.go       | 674 ++++++++++++++++++++++++++++
+ internal/niximage/niximage_test.go  | 409 +++++++++++++++++
+ internal/niximage/refusal.go        | 241 ++++++++++
+ internal/niximage/refusal_test.go   | 212 +++++++++
+ internal/nixref/nixref.go           |  70 +++
  internal/nixref/nixref_test.go      |  44 ++
  internal/resources/validate.go      |  20 +-
  internal/resources/validate_test.go |   5 +
- 13 files changed, 1827 insertions(+), 22 deletions(-)
+ 13 files changed, 2030 insertions(+), 22 deletions(-)
  create mode 100644 cmd/atelet/niximages.go
  create mode 100644 docs/guides/nix-images.md
  create mode 100644 internal/niximage/niximage.go
@@ -76,7 +76,7 @@ index 25353ecf..82f80b94 100644
  		t.Fatalf("resolveImageVolumes: %v", err)
  	}
 diff --git a/cmd/atelet/main.go b/cmd/atelet/main.go
-index 42d1e4d7..2616ddd8 100644
+index 42d1e4d7..984bad04 100644
 --- a/cmd/atelet/main.go
 +++ b/cmd/atelet/main.go
 @@ -58,6 +58,7 @@ import (
@@ -87,7 +87,21 @@ index 42d1e4d7..2616ddd8 100644
  	"go.ate.dev/substrate/internal/nodepath"
  	"go.ate.dev/substrate/internal/otlprelay"
  	"go.ate.dev/substrate/internal/pluginsocket"
-@@ -293,6 +294,11 @@ func main() {
+@@ -151,6 +152,13 @@ func main() {
+ 		fmt.Println(version.String())
+ 		return
+ 	}
++	if *nixRevoke != "" {
++		if err := revokeNixPath(context.Background(), *nixRevoke); err != nil {
++			fmt.Fprintln(os.Stderr, "atelet:", err)
++			os.Exit(1)
++		}
++		return
++	}
+ 	ctx := context.Background()
+ 	serverboot.InitLogger()
+ 	if err := serverboot.SetLogLevel(*logLevelFlag); err != nil {
+@@ -293,6 +301,11 @@ func main() {
  		go newImageCacheGC(imageCache, *imageCacheDir).Run(ctx)
  	}
  
@@ -99,7 +113,7 @@ index 42d1e4d7..2616ddd8 100644
  	sandboxAssetCache, err := openSandboxAssetCache(ctx, *sandboxAssetCacheDir, *sandboxAssetCacheMinAge, *sandboxAssetFetchTimeout, nodepath.ActorsDir, nodepath.WorkersDir())
  	if err != nil {
  		serverboot.Fatal(ctx, "Failed to open sandbox asset cache", err)
-@@ -446,6 +452,7 @@ func main() {
+@@ -446,6 +459,7 @@ func main() {
  		bootID,
  	)
  	store.s = wmService
@@ -107,7 +121,7 @@ index 42d1e4d7..2616ddd8 100644
  	snapshots.Start()
  	go systemInfoVolumes.run(ctx)
  
-@@ -722,6 +729,9 @@ type Atelet struct {
+@@ -722,6 +736,9 @@ type Atelet struct {
  
  	workerDialer *WorkerDialer
  	imageCache   *imagecache.Store
@@ -117,7 +131,7 @@ index 42d1e4d7..2616ddd8 100644
  	// sandboxAssetCache holds every sandbox asset on the node once; actors get hard
  	// links into their own directories (see ensureSandboxAssets).
  	sandboxAssetCache *filecache.Store
-@@ -2260,7 +2270,7 @@ func (s *Atelet) prepareOCIBundles(
+@@ -2260,7 +2277,7 @@ func (s *Atelet) prepareOCIBundles(
  			envs = append(envs, fmt.Sprintf("%s=%s", env.GetName(), env.GetValue()))
  		}
  		g.Go(func() error {
@@ -128,10 +142,10 @@ index 42d1e4d7..2616ddd8 100644
  			}
 diff --git a/cmd/atelet/niximages.go b/cmd/atelet/niximages.go
 new file mode 100644
-index 00000000..e8694c3f
+index 00000000..9235e08d
 --- /dev/null
 +++ b/cmd/atelet/niximages.go
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,115 @@
 +// Copyright 2026 The Agent Substrate Authors
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -150,6 +164,8 @@ index 00000000..e8694c3f
 +
 +import (
 +	"context"
++	"errors"
++	"fmt"
 +	"log/slog"
 +	"time"
 +
@@ -162,7 +178,28 @@ index 00000000..e8694c3f
 +	nixViewDir      = pflag.String("nix-view-dir", "", "Directory for Nix closure views. Setting it enables \"nix:/nix/store/...\" image references: atelet asks the node's Nix daemon to substitute the closure and hard-links it into a per-closure view here. Must be on the same mount as /nix/store as atelet sees them (hard links cannot cross mounts), e.g. /nix/var/ate/views with the host's /nix mounted into atelet. Empty disables Nix images.")
 +	nixViewMountDir = pflag.String("nix-view-mount-dir", "", "Path at which the worker pods see --nix-view-dir, when it differs (e.g. the node bind-mounts the view directory under /var/lib/ate so it reaches the workers through the shared base mount). Empty means the same path.")
 +	nixStoreCommand = pflag.String("nix-store-command", "nix-store", "The nix-store executable atelet runs (against the daemon) to substitute closures and list their paths.")
++	nixRevoke       = pflag.String("nix-revoke", "", "Make this node forget a Nix store path, then exit: remove every view under --nix-view-dir whose closure holds the path (actors still running from one lose their files), and delete the path and all store paths that depend on it. Images are checked against the daemon's signature policy only when they are downloaded, so after a key leaves trusted-public-keys, run this for what it signed. Run it beside the serving atelet, with the same --nix-* flags.")
 +)
++
++// revokeNixPath serves --nix-revoke.
++func revokeNixPath(ctx context.Context, storePath string) error {
++	if *nixViewDir == "" {
++		return errors.New("--nix-revoke needs --nix-view-dir")
++	}
++	store, err := niximage.Attach(*nixViewDir, niximage.WithNixStoreCommand(*nixStoreCommand))
++	if err != nil {
++		return err
++	}
++	views, err := store.Revoke(ctx, storePath)
++	for _, v := range views {
++		fmt.Printf("removed view %s\n", v)
++	}
++	if err != nil {
++		return err
++	}
++	fmt.Printf("revoked %s\n", storePath)
++	return nil
++}
 +
 +// nixRootSet is what the view GC needs from *imagecache.Store.
 +type nixRootSet interface {
@@ -342,10 +379,10 @@ index c046a179..f3df3179 100644
  		})
 diff --git a/docs/guides/nix-images.md b/docs/guides/nix-images.md
 new file mode 100644
-index 00000000..70f6aeac
+index 00000000..bdd56e2a
 --- /dev/null
 +++ b/docs/guides/nix-images.md
-@@ -0,0 +1,159 @@
+@@ -0,0 +1,182 @@
 +---
 +title: "Nix Images"
 +linkTitle: "Nix Images"
@@ -384,7 +421,7 @@ index 00000000..70f6aeac
 +- **No registry in the critical path.** A node that already has the closure
 +  starts actors with every cache unreachable.
 +- **Supply chain.** The daemon accepts only paths signed by a key the node
-+  trusts. The reference is content-addressed, so it is pinned by construction.
++  trusts. A reference names one build; the signature ties it to its content.
 +
 +Image volumes accept the same reference form.
 +
@@ -505,12 +542,35 @@ index 00000000..70f6aeac
 +A suspended actor does not keep a view on the node: its closure is refetched
 +from the binary cache when it resumes. Keep every closure that a live or
 +suspended actor references in your binary cache.
++
++## Revoking an image
++
++The daemon checks signatures when it downloads a path, not when an actor
++starts. A node that already has a closure keeps using it after you remove the
++signing key from `trusted-public-keys` or the path from the cache. To make a
++node forget a path, run atelet once more beside the serving one, with the same
++`--nix-*` flags plus `--nix-revoke`:
++
++```sh
++kubectl -n ate-system exec <atelet pod> -- /ko-app/atelet \
++  --nix-view-dir=/nix/var/ate/views \
++  --nix-revoke=/nix/store/<hash>-<name>
++```
++
++It removes every view whose closure holds the path, then deletes the path and
++every store path that depends on it from the node's store. Revoke a shared
++package and each image built on it goes. The next actor that asks for such an
++image has it downloaded again, under the policy the daemon has then: remove
++the key or the cached copy first, or the node takes the path back. Run it on
++every node. Actors still running from a revoked image lose their files; delete
++them. If something outside atelet keeps a dependent path alive (another GC
++root), the views are still removed and the command fails with the path named.
 diff --git a/internal/niximage/niximage.go b/internal/niximage/niximage.go
 new file mode 100644
-index 00000000..14b0f2ef
+index 00000000..f5c447ab
 --- /dev/null
 +++ b/internal/niximage/niximage.go
-@@ -0,0 +1,599 @@
+@@ -0,0 +1,674 @@
 +// Copyright 2026 The Agent Substrate Authors
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -545,7 +605,8 @@ index 00000000..14b0f2ef
 +//
 +// Files are hard links, so every view of a store path shares that path's
 +// blocks and page cache, and a view stays intact even if the Nix garbage
-+// collector later deletes the store path. Hard links cannot cross mounts:
++// collector later deletes the store path; Revoke removes both. Hard links
++// cannot cross mounts:
 +// viewDir must be on the same mount as the store, as atelet sees them.
 +package niximage
 +
@@ -675,6 +736,16 @@ index 00000000..14b0f2ef
 +// New opens (creating if needed) the view store rooted at viewDir and removes
 +// views left half-built by a previous process.
 +func New(viewDir string, opts ...Option) (*Store, error) {
++	if err := removeAll(filepath.Join(viewDir, tmpDirName)); err != nil {
++		return nil, fmt.Errorf("while clearing unfinished nix views: %w", err)
++	}
++	return Attach(viewDir, opts...)
++}
++
++// Attach opens the view store rooted at viewDir beside the process that owns
++// it, for a one-off operation such as Revoke. Unlike New it leaves unfinished
++// views alone: they may belong to a build the owner is running.
++func Attach(viewDir string, opts ...Option) (*Store, error) {
 +	s := &Store{
 +		viewDir:  viewDir,
 +		mountDir: viewDir,
@@ -684,9 +755,6 @@ index 00000000..14b0f2ef
 +	}
 +	for _, o := range opts {
 +		o(s)
-+	}
-+	if err := removeAll(filepath.Join(viewDir, tmpDirName)); err != nil {
-+		return nil, fmt.Errorf("while clearing unfinished nix views: %w", err)
 +	}
 +	for _, d := range []string{viewsDirName, gcRootsDirName, tmpDirName} {
 +		if err := os.MkdirAll(filepath.Join(viewDir, d), 0o755); err != nil {
@@ -1046,7 +1114,7 @@ index 00000000..14b0f2ef
 +		if inUse[base] {
 +			continue
 +		}
-+		trash, err := s.retire(base)
++		trash, err := s.retire(base, s.minAge)
 +		if err != nil {
 +			errs = append(errs, err)
 +			continue
@@ -1063,9 +1131,76 @@ index 00000000..14b0f2ef
 +	return removed, errors.Join(errs...)
 +}
 +
-+// retire moves an old-enough view out of the way and drops its GC root. It
-+// returns the directory to delete, or "" if the view is too young.
-+func (s *Store) retire(base string) (string, error) {
++// Revoke makes this node forget storePath: it removes every view whose
++// closure holds the path, in use or not, with its GC root, then deletes the
++// path and every store path that depends on it from the node's store. The
++// next actor that asks for such an image has it substituted again, under the
++// signature policy the daemon has then; that is the only moment the policy
++// is applied, so a key removed from the node takes effect for a cached image
++// only through this.
++//
++// It returns the views it removed. An actor still running from one of them
++// loses its files. A dependent path that something outside the view store
++// keeps alive stays, and the error says so.
++func (s *Store) Revoke(ctx context.Context, storePath string) ([]string, error) {
++	if !nixref.IsStorePath(storePath) {
++		return nil, fmt.Errorf("invalid nix store path %q", storePath)
++	}
++	base := path.Base(storePath)
++	viewsDir := filepath.Join(s.viewDir, viewsDirName)
++	entries, err := os.ReadDir(viewsDir)
++	if err != nil {
++		return nil, fmt.Errorf("while listing nix views: %w", err)
++	}
++	var removed []string
++	for _, e := range entries {
++		view := e.Name()
++		if _, err := os.Lstat(filepath.Join(viewsDir, view, layerFSDirName, LogicalStoreDir, base)); err != nil {
++			if errors.Is(err, fs.ErrNotExist) {
++				continue
++			}
++			return removed, err
++		}
++		trash, err := s.retire(view, 0)
++		if err != nil {
++			return removed, fmt.Errorf("while removing view %q: %w", view, err)
++		}
++		if trash == "" {
++			continue
++		}
++		if err := removeAll(trash); err != nil {
++			return removed, fmt.Errorf("while removing view %q: %w", view, err)
++		}
++		removed = append(removed, view)
++	}
++
++	out, err := s.run(ctx, "--query", "--referrers-closure", storePath)
++	if err != nil {
++		var cmdErr *commandError
++		if errors.As(err, &cmdErr) && strings.Contains(cmdErr.stderr, "is not valid") {
++			return removed, nil // the store does not hold it
++		}
++		return removed, fmt.Errorf("while listing what depends on %q: %w", storePath, err)
++	}
++	doomed := strings.Fields(string(out))
++	for _, p := range doomed {
++		if !nixref.IsStorePath(p) {
++			return removed, fmt.Errorf("dependents of %q list %q, which is not a store path", storePath, p)
++		}
++	}
++	if len(doomed) == 0 {
++		return removed, nil
++	}
++	if _, err := s.run(ctx, append([]string{"--delete"}, doomed...)...); err != nil {
++		return removed, fmt.Errorf("the views are removed, but the store still holds %q or a path that depends on it: %w", storePath, err)
++	}
++	return removed, nil
++}
++
++// retire moves a view that has gone unused for minAge out of the way and
++// drops its GC root. It returns the directory to delete, or "" if the view
++// is too young.
++func (s *Store) retire(base string, minAge time.Duration) (string, error) {
 +	s.mu.Lock()
 +	defer s.mu.Unlock()
 +	view := filepath.Join(s.viewDir, viewsDirName, base)
@@ -1076,7 +1211,7 @@ index 00000000..14b0f2ef
 +		}
 +		return "", err
 +	}
-+	if time.Since(info.ModTime()) < s.minAge {
++	if time.Since(info.ModTime()) < minAge {
 +		return "", nil
 +	}
 +	trash, err := os.MkdirTemp(filepath.Join(s.viewDir, tmpDirName), "evict-*")
@@ -1112,10 +1247,10 @@ index 00000000..14b0f2ef
 +}
 diff --git a/internal/niximage/niximage_test.go b/internal/niximage/niximage_test.go
 new file mode 100644
-index 00000000..90c6784a
+index 00000000..981da43e
 --- /dev/null
 +++ b/internal/niximage/niximage_test.go
-@@ -0,0 +1,334 @@
+@@ -0,0 +1,409 @@
 +// Copyright 2026 The Agent Substrate Authors
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -1161,6 +1296,9 @@ index 00000000..90c6784a
 +	// realiseStderr, when set, makes --realise fail the way nix-store does,
 +	// printing it on stderr.
 +	realiseStderr string
++	// referrers answers --query --referrers-closure; deleteErr fails --delete.
++	referrers []string
++	deleteErr error
 +}
 +
 +func (n *fakeNode) run(_ context.Context, args ...string) ([]byte, error) {
@@ -1170,6 +1308,15 @@ index 00000000..90c6784a
 +	}
 +	if args[0] == "--realise" && n.realiseStderr != "" {
 +		return nil, &commandError{command: "nix-store", args: args, err: errors.New("exit status 1"), stderr: n.realiseStderr}
++	}
++	if args[0] == "--query" && args[1] == "--referrers-closure" {
++		if n.referrers == nil {
++			return nil, &commandError{command: "nix-store", args: args, err: errors.New("exit status 1"), stderr: "error: path '" + args[2] + "' is not valid"}
++		}
++		return []byte(strings.Join(n.referrers, "\n") + "\n"), nil
++	}
++	if args[0] == "--delete" {
++		return nil, n.deleteErr
 +	}
 +	if args[0] == "--query" {
 +		return []byte(strings.Join(n.closure, "\n") + "\n"), nil
@@ -1439,6 +1586,69 @@ index 00000000..90c6784a
 +	// An evicted view is rebuilt on demand.
 +	if _, _, err := s.EnsureImage(t.Context(), envPath); err != nil || !exists(view) {
 +		t.Errorf("EnsureImage after eviction: %v (view exists: %v)", err, exists(view))
++	}
++}
++
++func TestRevoke(t *testing.T) {
++	node, viewDir := newFakeNode(t)
++	// The default minimum age would keep these views from eviction.
++	s := newStore(t, node, viewDir)
++	if _, _, err := s.EnsureImage(t.Context(), envPath); err != nil {
++		t.Fatalf("EnsureImage: %v", err)
++	}
++	otherPath := LogicalStoreDir + "/" + otherBase
++	node.closure = []string{otherPath}
++	if _, _, err := s.EnsureImage(t.Context(), otherPath); err != nil {
++		t.Fatalf("EnsureImage: %v", err)
++	}
++	exists := func(p string) bool { _, err := os.Lstat(p); return err == nil }
++	bashPath := LogicalStoreDir + "/" + bashBase
++
++	// Revoking a dependency takes the image built on it, and only that one.
++	node.referrers = []string{bashPath, envPath}
++	node.calls = nil
++	views, err := s.Revoke(t.Context(), bashPath)
++	if err != nil || !slices.Equal(views, []string{envBase}) {
++		t.Fatalf("Revoke = %v, %v; want the %s view removed", views, err, envBase)
++	}
++	if exists(filepath.Join(viewDir, "views", envBase)) || exists(filepath.Join(viewDir, "gcroots", envBase)) {
++		t.Error("the revoked image's view or GC root is still there")
++	}
++	if !exists(filepath.Join(viewDir, "views", otherBase)) || !exists(filepath.Join(viewDir, "gcroots", otherBase)) {
++		t.Error("an image that does not hold the revoked path lost its view or GC root")
++	}
++	if want := []string{"--delete", bashPath, envPath}; !slices.Equal(node.calls[len(node.calls)-1], want) {
++		t.Errorf("last nix-store call = %v, want %v", node.calls[len(node.calls)-1], want)
++	}
++
++	// A path the store no longer holds is already revoked.
++	node.referrers = nil
++	if views, err := s.Revoke(t.Context(), bashPath); err != nil || len(views) != 0 {
++		t.Errorf("Revoke of an absent path = %v, %v; want nothing to do", views, err)
++	}
++
++	// A dependent the store keeps is reported, after the view is gone.
++	node.referrers = []string{otherPath}
++	node.deleteErr = errors.New("still alive")
++	views, err = s.Revoke(t.Context(), otherPath)
++	if err == nil || !strings.Contains(err.Error(), "still holds") || !slices.Equal(views, []string{otherBase}) {
++		t.Errorf("Revoke with a live dependent = %v, %v; want the view removed and an error", views, err)
++	}
++
++	if _, err := s.Revoke(t.Context(), "/nix/store/../etc"); err == nil {
++		t.Error("Revoke accepted a path outside the store")
++	}
++}
++
++func TestAttachKeepsUnfinishedViews(t *testing.T) {
++	_, viewDir := newFakeNode(t)
++	half := filepath.Join(viewDir, "tmp", envBase+"-123", "fs", "half")
++	writeFile(t, half, "x", 0o444)
++	if _, err := Attach(viewDir); err != nil {
++		t.Fatalf("Attach: %v", err)
++	}
++	if _, err := os.Lstat(half); err != nil {
++		t.Errorf("Attach removed a view another process is building: %v", err)
 +	}
 +}
 +

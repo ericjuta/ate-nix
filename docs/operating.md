@@ -101,10 +101,31 @@ A template with a Nix image that lands on a node without `--nix-view-dir` fails 
 ## Trust
 
 - The node decides what to accept. A template cannot add a cache or a key.
-- Trust is checked when a path is downloaded, not each time an actor starts. If you remove a key, paths that the node already has stay usable, and so do their views. To revoke an image, also delete its view and its store path on each node. This repository has no tool for that.
+- Trust is checked when a path is downloaded, not each time an actor starts. If you remove a key, paths that the node already has stay usable, and so do their views. To revoke an image, see the next section.
 - With `require-sigs = true`, the daemon takes a path only if a key in `trusted-public-keys` signed it. An unsigned path and a path signed with an unknown key are both refused. [proof.md](proof.md) shows this test.
 - Give the signing key to the system that builds images (CI), not to the nodes. Nodes need the public key only.
 - A cache that needs a login is not tested. See [proof.md](proof.md).
+
+## Revoke an image
+
+Use this when an image, or a package inside images, must not run again: a leaked signing key, a bad build.
+
+1. Stop the source. Remove the key from `trusted-public-keys` on each node and restart the Nix daemon, or delete the path from the cache. If you skip this step, the node downloads the path again on the next request.
+2. On each node, run atelet one more time beside the running one. `--nix-revoke` makes it do one job and exit:
+
+   ```sh
+   kubectl -n ate-system exec <atelet pod on the node> -- /ko-app/atelet \
+     --nix-view-dir=/nix/var/ate/views \
+     --nix-store-command=/nix/var/nix/profiles/default/bin/nix-store \
+     --nix-revoke=/nix/store/<hash>-<name>
+   ```
+
+   It removes each view that contains the path. Then it deletes the path, and each store path that depends on the path, from the node's store. If you revoke a package, all images on the node that contain the package go.
+3. Delete the actors that run from a revoked image. Their files are gone.
+
+After that, a request for the image is a new download, and the node applies its current trust rules. `kind/private-cache.sh` shows the full sequence.
+
+If a store path that depends on the revoked path has another GC root (for example, a `result` link from a build on the node), Nix does not delete it. The views are removed, the command fails, and the error names the path. Remove the root and run the command again.
 
 ## Check that it works
 

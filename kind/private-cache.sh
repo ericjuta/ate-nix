@@ -10,6 +10,10 @@
 # store, and the template's error must say why: no signature, an untrusted
 # key, or no cache that has the path.
 #
+# Then it revokes the first image: the node stops trusting the key, which
+# alone changes nothing for an image the node already has; `atelet
+# --nix-revoke` removes it from the node; after that the node refuses it.
+#
 #   WORKER_IMAGE=<ateworker-gvisor image> kind/private-cache.sh
 #
 # Needs kubectl, kubectl-ate, envsubst and docker on PATH. Run after
@@ -32,7 +36,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 run="$(date +%s)"
 cleanup() {
-  for tag in signed unsigned rogue missing; do
+  for tag in signed unsigned rogue missing cached revoked; do
     ate delete actor-template "private-${tag}-${run}" -a ate-nix-proof >/dev/null 2>&1 || true
   done
 }
@@ -104,15 +108,19 @@ error_of() { sed -n 's/^ *"errorMessage": "\(.*\)",\{0,1\}$/\1/p' <<<"$1"; }
 # atelet puts the reason between "while realising <path>:" and nix-store's
 # own error.
 reason_of() { sed -e 's/.*while realising [^:]*: //' -e 's/; [^ ]*nix-store --realise .*//' <<<"$1"; }
+# Creates template $1 from store path $2 and prints its settled status.
+boot() {
+  PROOF_IMAGE="$2" envsubst < "${HERE}/proof-template.yaml" | sed "s/^  name: nix-proof$/  name: $1/" |
+    ate create actor-template -f - >/dev/null
+  settle "$1"
+}
 
 for tag in signed unsigned rogue missing; do
   PROOF_IMAGE="$(path_of "${tag}")"
   export PROOF_IMAGE
   template="private-${tag}-${run}"
   echo "== ${tag}: nix:${PROOF_IMAGE}"
-  envsubst < "${HERE}/proof-template.yaml" | sed "s/^  name: nix-proof$/  name: ${template}/" |
-    ate create actor-template -f - >/dev/null
-  status="$(settle "${template}")"
+  status="$(boot "${template}" "${PROOF_IMAGE}")"
   if [[ "${tag}" == signed ]]; then
     grep -q snapshotTime <<<"${status}" || fail "the signed image did not boot: ${status}"
     node env NIX_REMOTE=daemon /nix/var/nix/profiles/default/bin/nix \
@@ -138,5 +146,29 @@ for tag in signed unsigned rogue missing; do
     echo "   ${reason}"
   fi
 done
+
+signed="$(path_of signed)"
+echo "== revoke: the node stops trusting ${public_key%%:*}"
+docker exec -i "${NODE}" env \
+  SUBSTITUTERS="https://cache.nixos.org http://${CACHE}" \
+  TRUSTED_PUBLIC_KEYS="cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=" \
+  sh -s < "${HERE}/node-setup.sh" >/dev/null
+status="$(boot "private-cached-${run}" "${signed}")"
+grep -q snapshotTime <<<"${status}" || fail "the cached image did not boot after the key was removed: ${status}"
+echo "   the image the node already has still boots"
+k -n ate-system exec ds/atelet -c atelet -- /ko-app/atelet \
+  --nix-view-dir=/nix/var/ate/views \
+  --nix-store-command=/nix/var/nix/profiles/default/bin/nix-store \
+  --nix-revoke="${signed}" 2>&1 | sed 's/^/   atelet: /'
+node test ! -e "${signed}" || fail "the revoked image is still in the node's store"
+node test ! -e "/nix/var/ate/views/views/${signed##*/}" || fail "the revoked image still has a view"
+status="$(boot "private-revoked-${run}" "${signed}")"
+! grep -q snapshotTime <<<"${status}" || fail "the revoked image booted"
+node test ! -e "${signed}" || fail "the revoked image came back to the node's store"
+reason="$(reason_of "$(error_of "${status}")")"
+want="binary cache http://${CACHE} has ${signed}, signed only by keys this node does not trust: ${public_key%%:*}"
+[[ "${reason}" == "${want}"* ]] || fail "the revoked template's error does not say why: ${status}"
+echo "   after atelet --nix-revoke: refused; not in the node's store"
+echo "   ${reason}"
 
 echo "PASS"
