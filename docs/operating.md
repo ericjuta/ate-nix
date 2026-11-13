@@ -101,6 +101,7 @@ A template with a Nix image that lands on a node without `--nix-view-dir` fails 
 ## Trust
 
 - The node decides what to accept. A template cannot add a cache or a key.
+- Trust is checked when a path is downloaded, not each time an actor starts. If you remove a key, paths that the node already has stay usable, and so do their views. To revoke an image, also delete its view and its store path on each node. This repository has no tool for that.
 - With `require-sigs = true`, the daemon takes a path only if a key in `trusted-public-keys` signed it. An unsigned path and a path signed with an unknown key are both refused. [proof.md](proof.md) shows this test.
 - Give the signing key to the system that builds images (CI), not to the nodes. Nodes need the public key only.
 - A cache that needs a login is not tested. See [proof.md](proof.md).

@@ -1,4 +1,4 @@
-From 5558a0dbea5b23fde3af2687628cae4104ac3f98 Mon Sep 17 00:00:00 2001
+From f7339a3fb96bc76bb52687e0242c01c69ff3d3ac Mon Sep 17 00:00:00 2001
 From: Eric Juta <ericjohnjuta@gmail.com>
 Date: Fri, 13 Nov 2026 11:13:28 +0000
 Subject: [PATCH] atelet: run actors from Nix store paths
@@ -26,14 +26,15 @@ redacted.
  cmd/atelet/niximages.go             |  92 +++++
  cmd/atelet/oci.go                   |  55 ++-
  docs/guides/nix-images.md           | 159 ++++++++
- internal/niximage/niximage.go       | 589 ++++++++++++++++++++++++++++
- internal/niximage/niximage_test.go  | 321 +++++++++++++++
- internal/niximage/refusal.go        | 241 ++++++++++++
+ internal/niximage/niximage.go       | 599 ++++++++++++++++++++++++++++
+ internal/niximage/niximage_test.go  | 334 ++++++++++++++++
+ internal/niximage/refusal.go        | 241 +++++++++++
  internal/niximage/refusal_test.go   | 212 ++++++++++
- internal/nixref/nixref.go           |  60 +++
+ internal/nixref/nixref.go           |  70 ++++
+ internal/nixref/nixref_test.go      |  44 ++
  internal/resources/validate.go      |  20 +-
  internal/resources/validate_test.go |   5 +
- 12 files changed, 1750 insertions(+), 22 deletions(-)
+ 13 files changed, 1827 insertions(+), 22 deletions(-)
  create mode 100644 cmd/atelet/niximages.go
  create mode 100644 docs/guides/nix-images.md
  create mode 100644 internal/niximage/niximage.go
@@ -41,6 +42,7 @@ redacted.
  create mode 100644 internal/niximage/refusal.go
  create mode 100644 internal/niximage/refusal_test.go
  create mode 100644 internal/nixref/nixref.go
+ create mode 100644 internal/nixref/nixref_test.go
 
 diff --git a/cmd/atelet/imagevolume_test.go b/cmd/atelet/imagevolume_test.go
 index 25353ecf..82f80b94 100644
@@ -505,10 +507,10 @@ index 00000000..70f6aeac
 +suspended actor references in your binary cache.
 diff --git a/internal/niximage/niximage.go b/internal/niximage/niximage.go
 new file mode 100644
-index 00000000..a8561bd1
+index 00000000..14b0f2ef
 --- /dev/null
 +++ b/internal/niximage/niximage.go
-@@ -0,0 +1,589 @@
+@@ -0,0 +1,599 @@
 +// Copyright 2026 The Agent Substrate Authors
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -703,6 +705,9 @@ index 00000000..a8561bd1
 +	if !nixref.IsStorePath(storePath) {
 +		return nil, nil, fmt.Errorf("invalid nix store path %q", storePath)
 +	}
++	if nixref.IsDerivation(storePath) {
++		return nil, nil, fmt.Errorf("nix store path %q is a derivation, not a built path", storePath)
++	}
 +	base := path.Base(storePath)
 +
 +	if !s.hit(base) {
@@ -742,13 +747,20 @@ index 00000000..a8561bd1
 +	return true
 +}
 +
-+func (s *Store) build(ctx context.Context, storePath string) error {
++func (s *Store) build(ctx context.Context, storePath string) (err error) {
 +	base := path.Base(storePath)
 +
 +	// Realise first, registering a GC root in the same step so the closure
 +	// cannot be collected between substitution and linking. The root lives
 +	// as long as the view does.
 +	gcRoot := filepath.Join(s.viewDir, gcRootsDirName, base)
++	defer func() {
++		// Without a view nothing would ever evict the root, and the closure
++		// would stay pinned in the store for good.
++		if err != nil {
++			_ = os.Remove(gcRoot)
++		}
++	}()
 +	if _, err := s.run(ctx, "--realise", storePath, "--add-root", gcRoot); err != nil {
 +		var cmdErr *commandError
 +		if errors.As(err, &cmdErr) {
@@ -1100,10 +1112,10 @@ index 00000000..a8561bd1
 +}
 diff --git a/internal/niximage/niximage_test.go b/internal/niximage/niximage_test.go
 new file mode 100644
-index 00000000..fe2a4c21
+index 00000000..90c6784a
 --- /dev/null
 +++ b/internal/niximage/niximage_test.go
-@@ -0,0 +1,321 @@
+@@ -0,0 +1,334 @@
 +// Copyright 2026 The Agent Substrate Authors
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -1161,6 +1173,12 @@ index 00000000..fe2a4c21
 +	}
 +	if args[0] == "--query" {
 +		return []byte(strings.Join(n.closure, "\n") + "\n"), nil
++	}
++	if args[0] == "--realise" {
++		// Like nix-store --add-root: the root is a link to the store path.
++		if err := os.Symlink(args[1], args[3]); err != nil && !errors.Is(err, os.ErrExist) {
++			return nil, err
++		}
 +	}
 +	return nil, nil
 +}
@@ -1326,6 +1344,7 @@ index 00000000..fe2a4c21
 +		wantErr string
 +	}{
 +		{"not a store path", "/etc/passwd", nil, "invalid nix store path"},
++		{"derivation", LogicalStoreDir + "/" + envBase + ".drv", nil, "is a derivation"},
 +		{"substitution fails", envPath, func(n *fakeNode) { n.fail = errors.New("no signature trusted") }, "no signature trusted"},
 +		{"closure lists a path outside the store", envPath, func(n *fakeNode) { n.closure = append(n.closure, "/nix/store/../../etc") }, "not a store path"},
 +		{"closure omits the root", envPath, func(n *fakeNode) { n.closure = n.closure[:2] }, "does not include the path itself"},
@@ -1340,6 +1359,14 @@ index 00000000..fe2a4c21
 +			_, _, err := s.EnsureImage(t.Context(), tc.path)
 +			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 +				t.Fatalf("EnsureImage error = %v, want one containing %q", err, tc.wantErr)
++			}
++			// A failed build leaves no GC root: with no view, nothing would
++			// ever evict it and the closure would stay pinned.
++			if entries, _ := os.ReadDir(filepath.Join(viewDir, "gcroots")); len(entries) != 0 {
++				t.Errorf("failed build left %d GC roots behind", len(entries))
++			}
++			if tc.name == "derivation" && len(node.calls) != 0 {
++				t.Errorf("nix-store was called for a derivation: %v", node.calls)
 +			}
 +			// A failed build leaves no view a later call could mistake for complete.
 +			if entries, _ := os.ReadDir(filepath.Join(viewDir, "views")); len(entries) != 0 {
@@ -1384,8 +1411,6 @@ index 00000000..fe2a4c21
 +	}
 +	view := filepath.Join(viewDir, "views", envBase)
 +	gcRoot := filepath.Join(viewDir, "gcroots", envBase)
-+	// The fake nix-store does not create the root; stand in for it.
-+	symlink(t, envPath, gcRoot)
 +	exists := func(p string) bool { _, err := os.Lstat(p); return err == nil }
 +
 +	if n, err := s.EvictUnused(nil); err != nil || n != 0 || !exists(view) {
@@ -1892,10 +1917,10 @@ index 00000000..91c63d2e
 +}
 diff --git a/internal/nixref/nixref.go b/internal/nixref/nixref.go
 new file mode 100644
-index 00000000..06da30b6
+index 00000000..4ed215e1
 --- /dev/null
 +++ b/internal/nixref/nixref.go
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,70 @@
 +// Copyright 2026 The Agent Substrate Authors
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -1947,6 +1972,9 @@ index 00000000..06da30b6
 +	if !IsStorePath(rest) {
 +		return "", true, fmt.Errorf("nix image reference %q: want %s%s/<hash>-<name>", ref, Scheme, StoreDir)
 +	}
++	if IsDerivation(rest) {
++		return "", true, fmt.Errorf("nix image reference %q names a derivation (.drv), not a built store path", ref)
++	}
 +	return rest, true, nil
 +}
 +
@@ -1955,6 +1983,63 @@ index 00000000..06da30b6
 +func IsStorePath(p string) bool {
 +	base, ok := strings.CutPrefix(p, StoreDir+"/")
 +	return ok && storePathBase.MatchString(base)
++}
++
++// IsDerivation reports whether p names a derivation file. Realising one makes
++// Nix build its outputs, which a node must never do for an image: an image is
++// a built path that the node only fetches.
++func IsDerivation(p string) bool {
++	return strings.HasSuffix(p, ".drv")
++}
+diff --git a/internal/nixref/nixref_test.go b/internal/nixref/nixref_test.go
+new file mode 100644
+index 00000000..35e54bfc
+--- /dev/null
++++ b/internal/nixref/nixref_test.go
+@@ -0,0 +1,44 @@
++// Copyright 2026 The Agent Substrate Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package nixref
++
++import "testing"
++
++func TestParse(t *testing.T) {
++	const built = "/nix/store/0c0zb1l7mqvdrsgjq7b9vl0g9cyfh3q1-agent-env"
++	tests := []struct {
++		name     string
++		ref      string
++		wantPath string
++		wantNix  bool
++		wantErr  bool
++	}{
++		{"oci reference", "registry.example/app@sha256:abc", "", false, false},
++		{"built store path", "nix:" + built, built, true, false},
++		// Realising a derivation builds on the node; only built paths are images.
++		{"derivation", "nix:" + built + ".drv", "", true, true},
++		{"path below a store path", "nix:" + built + "/bin/sh", "", true, true},
++		{"outside the store", "nix:/etc/passwd", "", true, true},
++		{"traversal", "nix:/nix/store/../../etc/passwd", "", true, true},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			got, isNix, err := Parse(tc.ref)
++			if got != tc.wantPath || isNix != tc.wantNix || (err != nil) != tc.wantErr {
++				t.Errorf("Parse(%q) = %q, %v, %v; want %q, %v, error=%v", tc.ref, got, isNix, err, tc.wantPath, tc.wantNix, tc.wantErr)
++			}
++		})
++	}
 +}
 diff --git a/internal/resources/validate.go b/internal/resources/validate.go
 index cff8d9ec..b50497e6 100644

@@ -16,7 +16,7 @@ index fca6e13..23edf89 100644
  // that has already exited is not an error.
  func (p *Process) Kill(ctx context.Context) (*ateenvv1alpha.Process, error) {
 diff --git a/cmd/ate-env/main.go b/cmd/ate-env/main.go
-index 2f0cb31..073d3a6 100644
+index 2f0cb31..5d04d14 100644
 --- a/cmd/ate-env/main.go
 +++ b/cmd/ate-env/main.go
 @@ -21,16 +21,24 @@
@@ -67,7 +67,7 @@ index 2f0cb31..073d3a6 100644
  			req := env.ShellRequest{Command: strings.Join(args, " "), Timeout: shellTimeout}
  			if shellStdin {
  				data, err := io.ReadAll(os.Stdin)
-@@ -125,12 +138,213 @@ func newGuestCommand(id string) *cobra.Command {
+@@ -125,12 +138,243 @@ func newGuestCommand(id string) *cobra.Command {
  		},
  	}
  	shellCmd.Flags().BoolVarP(&shellStdin, "stdin", "i", false, "feed this process's stdin to the command")
@@ -79,6 +79,27 @@ index 2f0cb31..073d3a6 100644
  	return guestCmd
  }
  
++// outputDrainTimeout bounds the wait for remaining output after the remote
++// process has ended.
++const outputDrainTimeout = 2 * time.Second
++
++// exitCodeError carries the exit code of a remote command to main. Returning
++// it, instead of calling os.Exit, lets deferred cleanup run first: the
++// terminal must leave raw mode before this process ends.
++type exitCodeError int
++
++func (e exitCodeError) Error() string { return fmt.Sprintf("command exited with code %d", int(e)) }
++
++// exitStatus maps an error from the root command to this process's exit
++// code, and reports whether the error should be printed.
++func exitStatus(err error) (code int, report bool) {
++	var exit exitCodeError
++	if errors.As(err, &exit) {
++		return int(exit), false
++	}
++	return 1, true
++}
++
 +func runTTYShell(ctx context.Context, e *env.Env, commandLine string, timeout time.Duration, suspendOnOSC7501Inactive bool) error {
 +	fd := int(os.Stdin.Fd())
 +	if !term.IsTerminal(fd) {
@@ -126,7 +147,9 @@ index 2f0cb31..073d3a6 100644
 +			errCh <- err
 +		}
 +	}()
++	outputDone := make(chan struct{})
 +	go func() {
++		defer close(outputDone)
 +		stream, err := proc.Output(ctx, &ateenvv1alpha.StreamProcessOutputRequest{Follow: true})
 +		if err != nil {
 +			errCh <- err
@@ -157,9 +180,8 @@ index 2f0cb31..073d3a6 100644
 +					return
 +				}
 +			case *ateenvv1alpha.ProcessOutput_Exit:
-+				if out.Exit.GetExitCode() != 0 {
-+					os.Exit(int(out.Exit.GetExitCode()))
-+				}
++				// Wait reports the exit code; exiting here would skip the
++				// deferred terminal restore.
 +				return
 +			}
 +		}
@@ -187,6 +209,14 @@ index 2f0cb31..073d3a6 100644
 +	}()
 +
 +	exit, err := proc.Wait(ctx)
++	if err == nil {
++		// The process has ended; let the stream deliver what it still holds
++		// before it is cancelled.
++		select {
++		case <-outputDone:
++		case <-time.After(outputDrainTimeout):
++		}
++	}
 +	cancel()
 +	if err != nil {
 +		select {
@@ -201,8 +231,8 @@ index 2f0cb31..073d3a6 100644
 +		return asyncErr
 +	default:
 +	}
-+	if exit.GetExitCode() != 0 {
-+		os.Exit(int(exit.GetExitCode()))
++	if code := int(exit.GetExitCode()); code != 0 {
++		return exitCodeError(code)
 +	}
 +	if suspendOnOSC7501Inactive && osc7501InactiveSeen.Load() {
 +		if err := e.Suspend(context.WithoutCancel(ctx)); err != nil {
@@ -281,6 +311,59 @@ index 2f0cb31..073d3a6 100644
  func newCreateCommand() *cobra.Command {
  	var (
  		endpoint               string
+@@ -261,7 +505,10 @@ Common environment commands:
+ func main() {
+ 	root := newRootCommand(os.Args[1:])
+ 	if err := root.Execute(); err != nil {
+-		fmt.Fprintln(os.Stderr, "ate-env:", err)
+-		os.Exit(1)
++		code, report := exitStatus(err)
++		if report {
++			fmt.Fprintln(os.Stderr, "ate-env:", err)
++		}
++		os.Exit(code)
+ 	}
+ }
+diff --git a/cmd/ate-env/main_test.go b/cmd/ate-env/main_test.go
+index 80d0ec2..7a68fe0 100644
+--- a/cmd/ate-env/main_test.go
++++ b/cmd/ate-env/main_test.go
+@@ -16,6 +16,8 @@ package main
+ 
+ import (
+ 	"bytes"
++	"errors"
++	"fmt"
+ 	"strings"
+ 	"testing"
+ )
+@@ -227,3 +229,26 @@ func TestManifestTemplateRootfsImageFlags(t *testing.T) {
+ 		}
+ 	}
+ }
++
++// A remote command's exit code must reach the shell that ran ate-env by way
++// of main, after deferred cleanup, and without an error line of its own.
++func TestExitStatus(t *testing.T) {
++	tests := []struct {
++		name       string
++		err        error
++		wantCode   int
++		wantReport bool
++	}{
++		{"remote exit code", exitCodeError(7), 7, false},
++		{"wrapped remote exit code", fmt.Errorf("shell: %w", exitCodeError(130)), 130, false},
++		{"other error", errors.New("connection refused"), 1, true},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			code, report := exitStatus(tc.err)
++			if code != tc.wantCode || report != tc.wantReport {
++				t.Errorf("exitStatus(%v) = %d, %v; want %d, %v", tc.err, code, report, tc.wantCode, tc.wantReport)
++			}
++		})
++	}
++}
 diff --git a/go.mod b/go.mod
 index 7de68e4..9630ec8 100644
 --- a/go.mod

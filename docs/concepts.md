@@ -30,7 +30,8 @@ To change one file you build a new image, push it and pull it again.
 
 Nix is a package manager that builds each package into its own directory under `/nix/store`.
 The directory name starts with a hash of everything that went into the build, for example `/nix/store/0c0zb1l7mqvdrsgjq7b9vl0g9cyfh3q1-ripgrep-14.1`.
-Two different builds can never have the same name, so a name identifies exact content.
+The hash covers the inputs (sources, dependencies, build instructions), not the bytes that the build produced. For most packages, two builds from different inputs get different names.
+The name alone does not prove what the files contain. That proof is the signature: a cache key signs the name together with a hash of the content, and a node takes a path only when a key that it trusts has signed it.
 
 | Term | Meaning |
 | --- | --- |
@@ -63,7 +64,7 @@ The actor then sees exactly that closure as its root filesystem.
 | Build an image, push it to a registry | Build a store path, push it to a binary cache |
 | The node pulls and unpacks layers | The node downloads only the packages it lacks |
 | Two images that both contain Node.js store it twice, unless they share a layer | Two images that both contain the same Node.js share the same files on disk |
-| Pinned by a digest that you must write into the template | The store path already names exact content |
+| Pinned by a digest of the content that you must write into the template | Pinned by the store path, which names the build inputs. A trusted signature ties that path to its content |
 | Trust comes from the registry and your pull credentials | Trust comes from signatures: the node takes only paths that a key it trusts has signed |
 
 A **view** is the directory that atelet builds for one Nix image. It contains hard links to the store paths of the closure and to nothing else. The worker mounts the view as the read-only bottom layer of the actor's filesystem.

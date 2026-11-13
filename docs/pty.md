@@ -44,6 +44,8 @@ One part is dropped. His patch added mutual TLS between `ate-env-api` and the Su
 ```
 
 The gist's `deploy-omp-env-pty.sh` passes the old flag names. Change them before you use that script with this build.
+One part is changed. In his patch, `shell --tty` ended the process as soon as the remote command reported a non-zero exit code. That skipped the step that takes your terminal out of raw mode, and could cut off the last output. This repository returns the exit code after the terminal is restored, and waits up to two seconds for the remaining output. The exit code that your shell sees is the same.
+
 All other parts of his patch are applied unchanged.
 
 A second patch, `patches/env/0002-substrate-v1.0.0.patch`, changes only `go.mod` and `go.sum`. It moves env from a Substrate pre-release to Substrate v1.0.0. No source change was necessary.
