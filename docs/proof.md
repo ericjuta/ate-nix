@@ -17,7 +17,7 @@ Proven on 2026-11-13 on a single-node [kind](https://kind.sigs.k8s.io) cluster: 
 | A private cache is used only for paths that a trusted key signed. | `kind/private-cache.sh` puts three new images into a local cache. The image signed with a key in the node's `trusted-public-keys` booted, and is in the node's store with that signature. The unsigned image and the image signed with an unknown key were refused, and each template's error gives the cause: `binary cache http://ate-nix-cache has /nix/store/..., but it carries no signature`, and `... signed only by keys this node does not trust: ate-rogue-1`. Neither reached the node's store. |
 | OCI images still work. | The upstream counter demo ran on the same patched atelet. |
 
-Also proven, without a cluster: the Go unit tests of the patch pass, and the Nix build runs them.
+Also proven, without a cluster: the Go unit tests of the patch pass, and the Nix build runs them. CI builds the packages and images, and runs those tests, on `x86_64-linux` and `aarch64-linux`.
 
 ### Not proven
 
@@ -27,7 +27,8 @@ Also proven, without a cluster: the Go unit tests of the patch pass, and the Nix
 - A cache that needs a login. The private cache in the test was plain HTTP without authentication.
 - A direct test that an actor cannot change the node's store through its view. The design depends on the view being a read-only bottom layer.
 - The NixOS module `modules/ate-node.nix`. It has not been evaluated on a NixOS machine.
-- `aarch64-linux` and `aarch64-darwin` builds.
+- `aarch64-linux` on a cluster. CI builds it and runs the unit tests. No actor has run on an ARM node.
+- The `aarch64-darwin` build.
 - The full `cmd/atelet` test suite under Nix. It needs mount privileges that the Nix build sandbox does not have, so the build runs only the tests of the changed packages.
 
 ## PTY streams

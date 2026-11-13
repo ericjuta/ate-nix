@@ -90,7 +90,7 @@ nix build .#ate-env .#ate-substrate
 sh -n kind/node-setup.sh && bash -n kind/prove.sh kind/private-cache.sh
 ```
 
-CI (`.github/workflows/ci.yml`) runs these checks on each pull request, plus ShellCheck and a build of all images. CI does not start a cluster.
+CI (`.github/workflows/ci.yml`) runs these checks on each pull request, plus ShellCheck and a build of all images, on `x86_64-linux` and `aarch64-linux`. CI does not start a cluster.
 
 - A change to the substrate patch needs the local proof (`kind/prove.sh`, `kind/private-cache.sh`). If you did not run it, say so.
 - Update [proof.md](proof.md) only with results that you saw. Put all other items in "Not proven".

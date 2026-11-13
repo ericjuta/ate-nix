@@ -9,7 +9,7 @@ One of these:
 - **Nix** with flakes enabled, on Linux x86_64.
 - **Docker** only. Nix then runs in a container.
 
-Only `x86_64-linux` is built and tested. The flake also declares `aarch64-linux` and `aarch64-darwin`. Nobody has built them.
+CI builds and tests `x86_64-linux` and `aarch64-linux`. Only `x86_64-linux` has run on a cluster. The flake also declares `aarch64-darwin`. Nobody has built it.
 
 ## Get the source
 
