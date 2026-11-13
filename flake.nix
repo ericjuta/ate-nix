@@ -119,6 +119,7 @@
         # Container images of the patched binaries, as `docker load` tarballs.
         atelet-image = (pkgsFor system).ateImages.atelet;
         ateapi-image = (pkgsFor system).ateImages.ateapi;
+        ate-env-api-image = (pkgsFor system).ateImages.ate-env-api;
       });
 
       # `nix flake check` builds these for the current system. Building a

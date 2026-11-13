@@ -1,4 +1,4 @@
-# Container images of the two patched Substrate binaries, laid out like the
+# Container images of the patched binaries that run as cluster workloads, laid out like the
 # upstream ko images (/ko-app/<name>) so they drop into the upstream manifests
 # by changing only the image reference.
 #
@@ -10,23 +10,25 @@
   dockerTools,
   cacert,
   ate-substrate,
+  ate-env,
 }:
 
 let
   mkImage =
     {
+      package,
       binary,
       # uid:gid the container runs as. atelet's manifest pins root itself.
       user,
     }:
     dockerTools.buildLayeredImage {
       name = "ate-nix/${binary}";
-      tag = ate-substrate.version;
+      tag = package.version;
 
       extraCommands = ''
         mkdir -p ko-app etc/ssl/certs tmp
         chmod 1777 tmp
-        cp ${ate-substrate}/bin/${binary} ko-app/${binary}
+        cp ${package}/bin/${binary} ko-app/${binary}
         cp ${cacert}/etc/ssl/certs/ca-bundle.crt etc/ssl/certs/ca-certificates.crt
         cat > etc/passwd <<EOF
         root:x:0:0:root:/root:/sbin/nologin
@@ -47,11 +49,19 @@ let
 in
 {
   atelet = mkImage {
+    package = ate-substrate;
     binary = "atelet";
     user = "0:0";
   };
   ateapi = mkImage {
+    package = ate-substrate;
     binary = "ateapi";
+    user = "65532:65532";
+  };
+  # The env API server, for `ate-env manifest --api-image`.
+  ate-env-api = mkImage {
+    package = ate-env;
+    binary = "ate-env-api";
     user = "65532:65532";
   };
 }

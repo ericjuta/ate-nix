@@ -58,6 +58,7 @@ docker run --rm -v ate-nix-store:/nix -v "$PWD/out:/out" busybox cp -L <store pa
 | `.#ate-env` (default) | `ate-env`, `ate-env-api`, `ate-env-guest` with PTY streams. See [pty.md](pty.md). |
 | `.#ate-substrate` | `atelet` and `ateapi` from Substrate v1.0.0 with the Nix image source. See [nix-images.md](nix-images.md). |
 | `.#atelet-image`, `.#ateapi-image` | Container images of those two binaries, as `docker load` tarballs. Linux only. |
+| `.#ate-env-api-image` | Container image of the patched `ate-env-api`, as a `docker load` tarball. Linux only. |
 | `.#example-image` | A small Nix image: bash and coreutils. |
 | `.#proof-image` | The Nix image that the local proof starts: a small HTTP server. |
 

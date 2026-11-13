@@ -56,7 +56,13 @@ On 2026-11-13 both booted this way. The runtime actor answered `{"service":"refe
 
 The env service (`ate-env-api`) starts an environment from a template that you name, and that template can be a Nix image. So `ate-env <id> shell --tty` reaches the agent image with no change to env. On the same kind cluster:
 
-1. Build a container image of the patched `ate-env-api` and push it to the kind registry. This repository has no Nix output for that image. One way: take `bin/ate-env-api` from `nix build .#ate-env` (it is a static binary), `COPY` it into `gcr.io/distroless/static`, and push it to `localhost:5001`. Keep the digest reference that `docker push` prints.
+1. Build the container image of the patched `ate-env-api` and push it to the kind registry. Keep the digest reference that `docker push` prints.
+
+   ```sh
+   docker load < "$(nix build --no-link --print-out-paths ../..#ate-env-api-image)"    # ate-nix/ate-env-api:<version>
+   docker tag ate-nix/ate-env-api:<version> localhost:5001/ate-env-api
+   docker push localhost:5001/ate-env-api
+   ```
 2. Deploy the env service. It reuses the worker image of the counter demo.
 
    ```sh

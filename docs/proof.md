@@ -45,7 +45,7 @@ Also proven, without a cluster: the Go unit tests of the patch pass, and the Nix
 
 - Proven: `nix flake check` passes in `examples/reference` (app tests, both images, the image rules). On the kind cluster, the runtime image booted and served the app. The agent image booted, and a test client of its env guest daemon ran `go test` and `git` in it.
 - Proven: the env service (`ate-env-api`) with the agent image as its template. `ate-env create`, `ate-env <id> shell` and `shell --tty` worked from the Nix-built `ate-env`, and the files in `/work` were there after `ate-env suspend` and the next command. See "PTY streams" above.
-- The `ate-env-api` container image for that test was made by hand from the built binary. The flake has no output for it.
+- The `ate-env-api` container image for that test was made by hand from the built binary. The flake output `.#ate-env-api-image` came later: it builds, and it starts and prints its flags under Docker, but it has not run in a cluster.
 
 ## Review status
 
