@@ -104,6 +104,6 @@ PASS
 
 ```sh
 KIND_CLUSTER_NAME=ate-nix hack/delete-kind-cluster.sh
-docker rm -f ate-nix-cache kind-registry
+docker rm -f ate-nix-cache
 docker volume rm ate-nix-store ate-nix-cache
 ```
