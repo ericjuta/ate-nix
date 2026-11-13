@@ -19,8 +19,8 @@ buildGoModule {
   };
 
   patches = [
-    ../patches/0001-pty-process-streams.patch
-    ../patches/0002-substrate-v1.0.0.patch
+    ../patches/env/0001-pty-process-streams.patch
+    ../patches/env/0002-substrate-v1.0.0.patch
   ];
 
   vendorHash = "sha256-t6Tuhd5+Jcp66eflF4TYyepqri8Q3JaId2cnae0KDlU=";

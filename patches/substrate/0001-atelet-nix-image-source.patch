@@ -1,0 +1,1501 @@
+From 5139c9103ccde628feb301fa5f8345f284f4d6c2 Mon Sep 17 00:00:00 2001
+From: Eric Juta <ericjohnjuta@gmail.com>
+Date: Fri, 13 Nov 2026 11:13:28 +0000
+Subject: [PATCH] atelet: run actors from Nix store paths
+
+A container or image volume reference of the form nix:/nix/store/<hash>-<name>
+is served from the node's Nix store instead of an OCI registry. atelet asks
+the Nix daemon to substitute the closure, hard-links it into a per-closure
+view and hands that view to the worker through the existing overlay spec, so
+no image is built, pushed or pulled.
+---
+ cmd/atelet/imagevolume_test.go      |   6 +-
+ cmd/atelet/main.go                  |  12 +-
+ cmd/atelet/niximages.go             |  92 +++++
+ cmd/atelet/oci.go                   |  55 ++-
+ docs/guides/nix-images.md           | 137 +++++++
+ internal/niximage/niximage.go       | 583 ++++++++++++++++++++++++++++
+ internal/niximage/niximage_test.go  | 315 +++++++++++++++
+ internal/nixref/nixref.go           |  60 +++
+ internal/resources/validate.go      |  20 +-
+ internal/resources/validate_test.go |   5 +
+ 10 files changed, 1263 insertions(+), 22 deletions(-)
+ create mode 100644 cmd/atelet/niximages.go
+ create mode 100644 docs/guides/nix-images.md
+ create mode 100644 internal/niximage/niximage.go
+ create mode 100644 internal/niximage/niximage_test.go
+ create mode 100644 internal/nixref/nixref.go
+
+diff --git a/cmd/atelet/imagevolume_test.go b/cmd/atelet/imagevolume_test.go
+index 25353ecf..82f80b94 100644
+--- a/cmd/atelet/imagevolume_test.go
++++ b/cmd/atelet/imagevolume_test.go
+@@ -131,7 +131,7 @@ func TestResolveImageVolumes_RecordsLayersAndDigest(t *testing.T) {
+ 	}}
+ 	mounts := []*ateletpb.VolumeMount{{Name: "agent", MountPath: "/ate"}}
+ 
+-	got, err := resolveImageVolumes(t.Context(), newImageVolumeStore(t), volumes, mounts)
++	got, err := resolveImageVolumes(t.Context(), newImageVolumeStore(t), nil, volumes, mounts)
+ 	if err != nil {
+ 		t.Fatalf("resolveImageVolumes: %v", err)
+ 	}
+@@ -165,7 +165,7 @@ func TestResolveImageVolumes_MultiLayer(t *testing.T) {
+ 	}}
+ 	mounts := []*ateletpb.VolumeMount{{Name: "agent", MountPath: "/ate"}}
+ 
+-	got, err := resolveImageVolumes(t.Context(), newImageVolumeStore(t), volumes, mounts)
++	got, err := resolveImageVolumes(t.Context(), newImageVolumeStore(t), nil, volumes, mounts)
+ 	if err != nil {
+ 		t.Fatalf("resolveImageVolumes: %v", err)
+ 	}
+@@ -187,7 +187,7 @@ func TestResolveImageVolumes_UnmountedVolumeNotPulled(t *testing.T) {
+ 		Image: &ateletpb.ImageVolumeSource{Reference: "127.0.0.1:1/nope@sha256:abc"},
+ 	}}
+ 
+-	got, err := resolveImageVolumes(t.Context(), newImageVolumeStore(t), volumes, nil)
++	got, err := resolveImageVolumes(t.Context(), newImageVolumeStore(t), nil, volumes, nil)
+ 	if err != nil {
+ 		t.Fatalf("resolveImageVolumes: %v", err)
+ 	}
+diff --git a/cmd/atelet/main.go b/cmd/atelet/main.go
+index 42d1e4d7..2616ddd8 100644
+--- a/cmd/atelet/main.go
++++ b/cmd/atelet/main.go
+@@ -58,6 +58,7 @@ import (
+ 	"go.ate.dev/substrate/internal/imagecache"
+ 	"go.ate.dev/substrate/internal/installdefaults"
+ 	"go.ate.dev/substrate/internal/k8sresolver"
++	"go.ate.dev/substrate/internal/niximage"
+ 	"go.ate.dev/substrate/internal/nodepath"
+ 	"go.ate.dev/substrate/internal/otlprelay"
+ 	"go.ate.dev/substrate/internal/pluginsocket"
+@@ -293,6 +294,11 @@ func main() {
+ 		go newImageCacheGC(imageCache, *imageCacheDir).Run(ctx)
+ 	}
+ 
++	nixImages, err := openNixImages(ctx, imageCache)
++	if err != nil {
++		serverboot.Fatal(ctx, "Failed to open the nix image views", err)
++	}
++
+ 	sandboxAssetCache, err := openSandboxAssetCache(ctx, *sandboxAssetCacheDir, *sandboxAssetCacheMinAge, *sandboxAssetFetchTimeout, nodepath.ActorsDir, nodepath.WorkersDir())
+ 	if err != nil {
+ 		serverboot.Fatal(ctx, "Failed to open sandbox asset cache", err)
+@@ -446,6 +452,7 @@ func main() {
+ 		bootID,
+ 	)
+ 	store.s = wmService
++	wmService.nixImages = nixImages
+ 	snapshots.Start()
+ 	go systemInfoVolumes.run(ctx)
+ 
+@@ -722,6 +729,9 @@ type Atelet struct {
+ 
+ 	workerDialer *WorkerDialer
+ 	imageCache   *imagecache.Store
++	// nixImages serves "nix:" image refs as closure views. nil means nix
++	// images are disabled (--nix-view-dir=""): such refs fail to start.
++	nixImages *niximage.Store
+ 	// sandboxAssetCache holds every sandbox asset on the node once; actors get hard
+ 	// links into their own directories (see ensureSandboxAssets).
+ 	sandboxAssetCache *filecache.Store
+@@ -2260,7 +2270,7 @@ func (s *Atelet) prepareOCIBundles(
+ 			envs = append(envs, fmt.Sprintf("%s=%s", env.GetName(), env.GetValue()))
+ 		}
+ 		g.Go(func() error {
+-			img, cwd, err := prepareOCIDirectory(gCtx, s.imageCache, actorUID, ctr.GetName(), ctr.GetImage(), spec.GetVolumes(), ctr.GetVolumeMounts())
++			img, cwd, err := prepareOCIDirectory(gCtx, s.imageCache, s.nixImages, actorUID, ctr.GetName(), ctr.GetImage(), spec.GetVolumes(), ctr.GetVolumeMounts())
+ 			if err != nil {
+ 				return wrapFileSystemErr(fmt.Sprintf("while creating %q OCI bundle", ctr.GetName()), err)
+ 			}
+diff --git a/cmd/atelet/niximages.go b/cmd/atelet/niximages.go
+new file mode 100644
+index 00000000..e8694c3f
+--- /dev/null
++++ b/cmd/atelet/niximages.go
+@@ -0,0 +1,92 @@
++// Copyright 2026 The Agent Substrate Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package main
++
++import (
++	"context"
++	"log/slog"
++	"time"
++
++	"github.com/spf13/pflag"
++	"go.ate.dev/substrate/internal/imagecache"
++	"go.ate.dev/substrate/internal/niximage"
++)
++
++var (
++	nixViewDir      = pflag.String("nix-view-dir", "", "Directory for Nix closure views. Setting it enables \"nix:/nix/store/...\" image references: atelet asks the node's Nix daemon to substitute the closure and hard-links it into a per-closure view here. Must be on the same mount as /nix/store as atelet sees them (hard links cannot cross mounts), e.g. /nix/var/ate/views with the host's /nix mounted into atelet. Empty disables Nix images.")
++	nixViewMountDir = pflag.String("nix-view-mount-dir", "", "Path at which the worker pods see --nix-view-dir, when it differs (e.g. the node bind-mounts the view directory under /var/lib/ate so it reaches the workers through the shared base mount). Empty means the same path.")
++	nixStoreCommand = pflag.String("nix-store-command", "nix-store", "The nix-store executable atelet runs (against the daemon) to substitute closures and list their paths.")
++)
++
++// nixRootSet is what the view GC needs from *imagecache.Store.
++type nixRootSet interface {
++	InUse() (imagecache.RootSet, error)
++}
++
++// openNixImages opens the Nix view store when --nix-view-dir is set and
++// starts its GC loop. It returns nil when Nix images are disabled.
++func openNixImages(ctx context.Context, roots nixRootSet) (*niximage.Store, error) {
++	if *nixViewDir == "" {
++		return nil, nil
++	}
++	store, err := niximage.New(*nixViewDir,
++		niximage.WithMountDir(*nixViewMountDir),
++		niximage.WithNixStoreCommand(*nixStoreCommand),
++		niximage.WithMinAge(*imageCacheMinAge),
++	)
++	if err != nil {
++		return nil, err
++	}
++	if *imageCacheGCPeriod > 0 {
++		go runNixViewGC(ctx, store, roots, *imageCacheGCPeriod)
++	}
++	return store, nil
++}
++
++// runNixViewGC removes views no bundle uses, on the image cache GC's period.
++// Views are cheap to rebuild (links only), so there is no watermark: an
++// unused view goes once it is older than the minimum age. A view holds its
++// closure's GC root, so this is also what lets the Nix collector reclaim
++// closures no actor on the node runs.
++func runNixViewGC(ctx context.Context, store *niximage.Store, roots nixRootSet, period time.Duration) {
++	ticker := time.NewTicker(period)
++	defer ticker.Stop()
++	for {
++		nixViewGCPass(ctx, store, roots)
++		select {
++		case <-ctx.Done():
++			return
++		case <-ticker.C:
++		}
++	}
++}
++
++func nixViewGCPass(ctx context.Context, store *niximage.Store, roots nixRootSet) {
++	// An incomplete root set fails toward deleting a running actor's view,
++	// so a pass with one does nothing.
++	rs, err := roots.InUse()
++	if err != nil {
++		slog.WarnContext(ctx, "Nix view GC: root set incomplete; skipping this pass", slog.Any("err", err))
++		return
++	}
++	removed, err := store.EvictUnused(rs.LayerHexes)
++	if err != nil {
++		slog.WarnContext(ctx, "Nix view GC: pass finished with errors", slog.Int("removed", removed), slog.Any("err", err))
++		return
++	}
++	if removed > 0 {
++		slog.InfoContext(ctx, "Nix view GC: removed unused views", slog.Int("removed", removed))
++	}
++}
+diff --git a/cmd/atelet/oci.go b/cmd/atelet/oci.go
+index c046a179..f3df3179 100644
+--- a/cmd/atelet/oci.go
++++ b/cmd/atelet/oci.go
+@@ -30,6 +30,8 @@ import (
+ 	"github.com/moby/sys/user"
+ 	"go.ate.dev/substrate/cmd/atelet/internal/ateletpath"
+ 	"go.ate.dev/substrate/internal/imagecache"
++	"go.ate.dev/substrate/internal/niximage"
++	"go.ate.dev/substrate/internal/nixref"
+ 	"go.ate.dev/substrate/internal/proto/ateletpb"
+ 	"go.ate.dev/substrate/internal/proto/ateworkerpb"
+ 	"go.opentelemetry.io/otel"
+@@ -80,10 +82,37 @@ func resolveCapabilities(caps *ateletpb.Capabilities) []string {
+ 	return out
+ }
+ 
++// ensureImage makes the image behind ref available on the node and returns
++// it, the digest the cache GC roots it by, and its layers as the worker pods
++// see them. A "nix:" ref is a Nix store path,
++// served by nixImages as a closure view; it has no digest, and its view is
++// rooted by layer path alone. Any other ref is an OCI image.
++func ensureImage(ctx context.Context, imageCache *imagecache.Store, nixImages *niximage.Store, ref string) (*imagecache.Image, string, []string, error) {
++	storePath, isNix, err := nixref.Parse(ref)
++	if err != nil {
++		return nil, "", nil, err
++	}
++	if isNix {
++		if nixImages == nil {
++			return nil, "", nil, fmt.Errorf("image %q is a nix store path, but nix images are not enabled on this node (--nix-view-dir)", ref)
++		}
++		img, layers, err := nixImages.EnsureImage(ctx, storePath)
++		if err != nil {
++			return nil, "", nil, fmt.Errorf("in nixImages.EnsureImage(%q): %w", storePath, err)
++		}
++		return img, "", layers, nil
++	}
++	img, err := imageCache.EnsureImage(ctx, ref)
++	if err != nil {
++		return nil, "", nil, fmt.Errorf("in imageCache.EnsureImage(%q): %w", ref, err)
++	}
++	return img, img.Digest.String(), img.LayerDirs, nil
++}
++
+ // prepareOCIDirectory pulls the container's image and writes the overlay spec
+ // the worker composes its rootfs from. It returns the image and the process's
+ // working directory, which the worker creates through the overlay.
+-func prepareOCIDirectory(ctx context.Context, imageCache *imagecache.Store, actorUID, containerName, ref string, volumes []*ateletpb.Volume, volumeMounts []*ateletpb.VolumeMount) (*imagecache.Image, string, error) {
++func prepareOCIDirectory(ctx context.Context, imageCache *imagecache.Store, nixImages *niximage.Store, actorUID, containerName, ref string, volumes []*ateletpb.Volume, volumeMounts []*ateletpb.VolumeMount) (*imagecache.Image, string, error) {
+ 	tracer := otel.Tracer("prepareOCIDirectory")
+ 
+ 	ctx, span := tracer.Start(ctx, "prepareOCIDirectory")
+@@ -113,19 +142,19 @@ func prepareOCIDirectory(ctx context.Context, imageCache *imagecache.Store, acto
+ 
+ 	var (
+ 		img          *imagecache.Image
++		imageDigest  string
++		layers       []string
+ 		imageVolumes []imagecache.ImageVolumeOverlay
+ 	)
+ 	g, gctx := errgroup.WithContext(ctx)
+ 	g.Go(func() error {
+ 		var err error
+-		if img, err = imageCache.EnsureImage(gctx, ref); err != nil {
+-			return fmt.Errorf("in imageCache.EnsureImage(%q): %w", ref, err)
+-		}
+-		return nil
++		img, imageDigest, layers, err = ensureImage(gctx, imageCache, nixImages, ref)
++		return err
+ 	})
+ 	g.Go(func() error {
+ 		var err error
+-		imageVolumes, err = resolveImageVolumes(gctx, imageCache, volumes, volumeMounts)
++		imageVolumes, err = resolveImageVolumes(gctx, imageCache, nixImages, volumes, volumeMounts)
+ 		return err
+ 	})
+ 	if err := g.Wait(); err != nil {
+@@ -147,8 +176,8 @@ func prepareOCIDirectory(ctx context.Context, imageCache *imagecache.Store, acto
+ 		extraDirs = append(extraDirs, cwd)
+ 	}
+ 	if err := imagecache.WriteSpec(bundlePath, &imagecache.OverlaySpec{
+-		ImageDigest:  img.Digest.String(),
+-		Layers:       img.LayerDirs,
++		ImageDigest:  imageDigest,
++		Layers:       layers,
+ 		ExtraDirs:    extraDirs,
+ 		ImageVolumes: imageVolumes,
+ 	}); err != nil {
+@@ -172,7 +201,7 @@ func resolveCwd(imageCfg *v1.Config) (string, error) {
+ 
+ // resolveImageVolumes pulls the image behind every image-typed volume this
+ // container mounts and returns what the overlay spec needs to compose each.
+-func resolveImageVolumes(ctx context.Context, imageCache *imagecache.Store, volumes []*ateletpb.Volume, volumeMounts []*ateletpb.VolumeMount) ([]imagecache.ImageVolumeOverlay, error) {
++func resolveImageVolumes(ctx context.Context, imageCache *imagecache.Store, nixImages *niximage.Store, volumes []*ateletpb.Volume, volumeMounts []*ateletpb.VolumeMount) ([]imagecache.ImageVolumeOverlay, error) {
+ 	mounted := make(map[string]bool, len(volumeMounts))
+ 	for _, vm := range volumeMounts {
+ 		mounted[vm.GetName()] = true
+@@ -193,14 +222,14 @@ func resolveImageVolumes(ctx context.Context, imageCache *imagecache.Store, volu
+ 	for i, vol := range wanted {
+ 		g.Go(func() error {
+ 			volRef := vol.GetImage().GetReference()
+-			img, err := imageCache.EnsureImage(gctx, volRef)
++			_, digest, layers, err := ensureImage(gctx, imageCache, nixImages, volRef)
+ 			if err != nil {
+-				return fmt.Errorf("in imageCache.EnsureImage(%q) for volume %q: %w", volRef, vol.GetName(), err)
++				return fmt.Errorf("for volume %q: %w", vol.GetName(), err)
+ 			}
+ 			out[i] = imagecache.ImageVolumeOverlay{
+ 				Name:        vol.GetName(),
+-				ImageDigest: img.Digest.String(),
+-				Layers:      img.LayerDirs,
++				ImageDigest: digest,
++				Layers:      layers,
+ 			}
+ 			return nil
+ 		})
+diff --git a/docs/guides/nix-images.md b/docs/guides/nix-images.md
+new file mode 100644
+index 00000000..23d3bd5e
+--- /dev/null
++++ b/docs/guides/nix-images.md
+@@ -0,0 +1,137 @@
++---
++title: "Nix Images"
++linkTitle: "Nix Images"
++weight: 30
++description: >
++  Run actors from Nix store paths instead of OCI images: no registry, no layers, no per-run pulls.
++---
++
++# Nix images
++
++A container's `image` normally names an OCI image pinned by digest. On nodes
++that run a Nix daemon it can name a Nix store path instead:
++
++```yaml
++containers:
++- name: agent
++  image: nix:/nix/store/0c0zb1l7mqvdrsgjq7b9vl0g9cyfh3q1-agent-env
++```
++
++The store path is the root of a closure that was built and signed ahead of
++time, by CI or a sandboxed builder. The node never evaluates or builds Nix
++code. When an actor starts, atelet asks the node's Nix daemon to substitute
++the paths of the closure that the node does not yet have, then exposes exactly
++that closure to the actor as its root filesystem.
++
++What this changes compared with an OCI image:
++
++- **Unit of delivery.** One store path per package rather than one layer per
++  build step. A change ships the changed derivations and their dependents,
++  nothing else.
++- **No per-run pull.** A node fetches only the paths it lacks, in parallel,
++  from its own store first and then from its binary caches. There is no unpack
++  step.
++- **Sharing is per package.** Two templates that both contain `nodejs` use the
++  same files on disk and the same page cache.
++- **No registry in the critical path.** A node that already has the closure
++  starts actors with every cache unreachable.
++- **Supply chain.** The daemon accepts only paths signed by a key the node
++  trusts. The reference is content-addressed, so it is pinned by construction.
++
++Image volumes accept the same reference form.
++
++## What the actor sees
++
++The actor's root filesystem is a read-only view of the closure, under the
++actor's usual private writable layer:
++
++- `/nix/store/<path>` for every path in the closure, and no other path from
++  the node's store.
++- For each top-level directory of the root path (`bin`, `etc`, `lib`, ...), a
++  directory of the same name whose entries link into the root path. A root
++  built with `pkgs.buildEnv` therefore gives the actor `/bin/sh`,
++  `/etc/passwd` and so on.
++- Empty `/proc`, `/sys`, `/dev`, `/tmp` and `/etc` where the root path does
++  not provide them.
++
++The store is read-only inside the actor. Writes go to the actor's private
++layer and are snapshotted as with any image.
++
++### Image config
++
++An OCI image carries its entrypoint, environment, working directory and user
++in its config. A Nix image carries the same fields, in the same JSON shape, in
++an optional file named `ate-image-config.json` at the top of the root path:
++
++```nix
++pkgs.buildEnv {
++  name = "agent-env";
++  paths = [
++    pkgs.bashInteractive pkgs.coreutils pkgs.ripgrep
++    (pkgs.writeTextDir "ate-image-config.json" (builtins.toJSON {
++      Entrypoint = [ "/bin/bash" ];
++      Env = [ "PATH=/bin" ];
++      WorkingDir = "/work";
++    }))
++  ];
++}
++```
++
++The template's `command`, `args` and `env` override it exactly as they
++override an OCI image's config. Without the file, the template must set
++`command`.
++
++## Node setup
++
++Nix images need three things on every node that runs them.
++
++1. **A Nix daemon** whose `nix.conf` lists your binary caches as
++   `substituters` and your signing keys as `trusted-public-keys`, with
++   `require-sigs` left on. This is where the trust policy lives; atelet passes
++   no substituter or key of its own.
++
++2. **atelet with access to the store.** Mount the host's `/nix` into the
++   atelet container and set:
++
++   | Flag | Value |
++   |---|---|
++   | `--nix-view-dir` | A directory on the same mount as `/nix/store`, for example `/nix/var/ate/views`. Setting it enables Nix images. |
++   | `--nix-store-command` | The `nix-store` executable, for example `/nix/var/nix/profiles/system/sw/bin/nix-store` on NixOS. |
++   | `--nix-view-mount-dir` | The path at which worker pods see the view directory, if different. See below. |
++
++   atelet builds each view out of hard links, which is why the view directory
++   must share a mount with the store. atelet talks to the daemon over its
++   socket under `/nix/var/nix/daemon-socket` and never writes the store.
++
++3. **Worker pods that can see the views.** Workers mount only `/var/lib/ate`
++   from the host. Bind-mount the view directory beneath it on the node and
++   tell atelet where it appears:
++
++   ```nix
++   fileSystems."/var/lib/ate/nix-views" = {
++     device = "/nix/var/ate/views";
++     options = [ "bind" ];
++   };
++   ```
++
++   ```
++   --nix-view-dir=/nix/var/ate/views
++   --nix-view-mount-dir=/var/lib/ate/nix-views
++   ```
++
++A template that names a Nix image on a node where `--nix-view-dir` is unset
++fails to start with an error saying so. Use a worker pool's node selector to
++keep such templates on Nix nodes.
++
++## Garbage collection
++
++Each view registers a Nix GC root for its closure, so the Nix collector never
++removes a closure that a view on the node still stands for. atelet removes a
++view, and its root, once no actor bundle on the node references it and it has
++been unused for `--image-cache-min-age`; the pass runs every
++`--image-cache-gc-period`. After that the node's ordinary `nix-collect-garbage`
++schedule reclaims the paths.
++
++A suspended actor does not keep a view on the node: its closure is refetched
++from the binary cache when it resumes. Keep every closure that a live or
++suspended actor references in your binary cache.
+diff --git a/internal/niximage/niximage.go b/internal/niximage/niximage.go
+new file mode 100644
+index 00000000..a0dba99b
+--- /dev/null
++++ b/internal/niximage/niximage.go
+@@ -0,0 +1,583 @@
++// Copyright 2026 The Agent Substrate Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// Package niximage is the Nix image source: it turns a Nix store path into
++// something an actor can run, with no OCI image and no registry.
++//
++// A container whose image is "nix:/nix/store/<hash>-<name>" names the root of
++// a closure that was built and signed ahead of time. Nothing is evaluated or
++// built here. The node's Nix daemon substitutes whichever of the closure's
++// paths it is missing from its configured binary caches, under its own
++// signature policy, and this package then exposes exactly that closure to the
++// actor as one read-only directory ("view"):
++//
++//	<viewDir>/views/<hash>-<name>/fs/nix/store/<path>/...   hard links
++//	<viewDir>/views/<hash>-<name>/fs/{bin,etc,...}          links into the root path
++//
++// The view is handed to the worker as a single overlay lowerdir, through the
++// same rootfs-overlay.json contract OCI images use (see imagecache.OverlaySpec),
++// so the worker runtimes need no change. An actor sees only its own closure,
++// never the rest of the node's store.
++//
++// Files are hard links, so every view of a store path shares that path's
++// blocks and page cache, and a view stays intact even if the Nix garbage
++// collector later deletes the store path. Hard links cannot cross mounts:
++// viewDir must be on the same mount as the store, as atelet sees them.
++package niximage
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"io/fs"
++	"os"
++	"os/exec"
++	"path"
++	"path/filepath"
++	"strings"
++	"sync"
++	"syscall"
++	"time"
++
++	v1 "github.com/google/go-containerregistry/pkg/v1"
++	"go.ate.dev/substrate/internal/imagecache"
++	"go.ate.dev/substrate/internal/nixref"
++	"golang.org/x/sync/singleflight"
++)
++
++const (
++	// LogicalStoreDir is where the closure appears inside the actor.
++	LogicalStoreDir = nixref.StoreDir
++
++	// ConfigFileName is the optional file in the closure's root path that
++	// plays the role of the OCI image config (Entrypoint, Cmd, Env,
++	// WorkingDir, User), in the same JSON shape.
++	ConfigFileName = "ate-image-config.json"
++
++	// layerFSDirName is the subdirectory of a layer directory that holds its
++	// tree; it must match imagecache's layer layout.
++	layerFSDirName = "fs"
++
++	maxConfigSize   = 1 << 20
++	maxSymlinkHops  = 40
++	defaultMinAge   = 2 * time.Minute
++	viewsDirName    = "views"
++	gcRootsDirName  = "gcroots"
++	tmpDirName      = "tmp"
++	defaultNixStore = "nix-store"
++)
++
++// Runner runs the nix-store command with args and returns its standard output.
++type Runner func(ctx context.Context, args ...string) ([]byte, error)
++
++// Store builds and caches closure views.
++type Store struct {
++	viewDir  string
++	mountDir string
++	storeDir string
++	run      Runner
++	minAge   time.Duration
++
++	sf singleflight.Group
++
++	// mu closes the hit-versus-evict window: a cache hit holds it shared
++	// while it checks and touches a view, eviction holds it exclusively
++	// while it re-checks and removes one.
++	mu sync.RWMutex
++}
++
++// Option configures a Store.
++type Option func(*Store)
++
++// WithMountDir sets the directory under which the worker pods see viewDir,
++// when that differs from where atelet builds the views (for example when the
++// node bind-mounts the view directory under the shared ate base path). Layer
++// paths handed to the workers are rooted here.
++func WithMountDir(dir string) Option {
++	return func(s *Store) {
++		if dir != "" {
++			s.mountDir = dir
++		}
++	}
++}
++
++// WithStoreDir overrides where atelet reads store paths from (default
++// /nix/store). The closure always appears at /nix/store inside the actor.
++func WithStoreDir(dir string) Option {
++	return func(s *Store) { s.storeDir = dir }
++}
++
++// WithNixStoreCommand sets the nix-store executable (default "nix-store",
++// resolved on PATH). It is run with NIX_REMOTE=daemon.
++func WithNixStoreCommand(command string) Option {
++	return func(s *Store) {
++		if command != "" {
++			s.run = commandRunner(command)
++		}
++	}
++}
++
++// WithRunner replaces how nix-store is invoked.
++func WithRunner(r Runner) Option {
++	return func(s *Store) { s.run = r }
++}
++
++// WithMinAge sets how long an unreferenced view is kept before EvictUnused
++// may remove it (default 2m), covering the window between EnsureImage and
++// the bundle spec write that roots the view.
++func WithMinAge(d time.Duration) Option {
++	return func(s *Store) { s.minAge = d }
++}
++
++func commandRunner(command string) Runner {
++	return func(ctx context.Context, args ...string) ([]byte, error) {
++		cmd := exec.CommandContext(ctx, command, args...)
++		// Always go through the daemon: it owns the store, the substituter
++		// list, and the signature policy. atelet must not write the store.
++		cmd.Env = append(os.Environ(), "NIX_REMOTE=daemon")
++		var stderr bytes.Buffer
++		cmd.Stderr = &stderr
++		out, err := cmd.Output()
++		if err != nil {
++			return nil, fmt.Errorf("%s %s: %w: %s", command, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
++		}
++		return out, nil
++	}
++}
++
++// New opens (creating if needed) the view store rooted at viewDir and removes
++// views left half-built by a previous process.
++func New(viewDir string, opts ...Option) (*Store, error) {
++	s := &Store{
++		viewDir:  viewDir,
++		mountDir: viewDir,
++		storeDir: LogicalStoreDir,
++		run:      commandRunner(defaultNixStore),
++		minAge:   defaultMinAge,
++	}
++	for _, o := range opts {
++		o(s)
++	}
++	if err := removeAll(filepath.Join(viewDir, tmpDirName)); err != nil {
++		return nil, fmt.Errorf("while clearing unfinished nix views: %w", err)
++	}
++	for _, d := range []string{viewsDirName, gcRootsDirName, tmpDirName} {
++		if err := os.MkdirAll(filepath.Join(viewDir, d), 0o755); err != nil {
++			return nil, fmt.Errorf("while creating nix view dir: %w", err)
++		}
++	}
++	return s, nil
++}
++
++// EnsureImage makes the closure of storePath available on this node and
++// returns it as an image with a single layer. The returned image has no
++// digest: the store path is its identity. The image's LayerDirs are this
++// process's paths, for reading files out of it; the second result is the same
++// layers as the worker pods see them, for the overlay spec.
++func (s *Store) EnsureImage(ctx context.Context, storePath string) (*imagecache.Image, []string, error) {
++	if !nixref.IsStorePath(storePath) {
++		return nil, nil, fmt.Errorf("invalid nix store path %q", storePath)
++	}
++	base := path.Base(storePath)
++
++	if !s.hit(base) {
++		_, err, _ := s.sf.Do(base, func() (any, error) {
++			if s.hit(base) {
++				return nil, nil
++			}
++			// Detached from the caller: other callers may be waiting on the
++			// same build, and a view is useful to the next actor regardless.
++			return nil, s.build(context.WithoutCancel(ctx), storePath)
++		})
++		if err != nil {
++			return nil, nil, err
++		}
++	}
++
++	cfg, err := readConfig(filepath.Join(s.viewDir, viewsDirName, base, layerFSDirName), base)
++	if err != nil {
++		return nil, nil, fmt.Errorf("nix image %q: %w", storePath, err)
++	}
++	return &imagecache.Image{
++		Config:    cfg,
++		LayerDirs: []string{filepath.Join(s.viewDir, viewsDirName, base)},
++	}, []string{filepath.Join(s.mountDir, viewsDirName, base)}, nil
++}
++
++// hit reports whether the view exists, marking it used.
++func (s *Store) hit(base string) bool {
++	s.mu.RLock()
++	defer s.mu.RUnlock()
++	view := filepath.Join(s.viewDir, viewsDirName, base)
++	if _, err := os.Stat(filepath.Join(view, layerFSDirName)); err != nil {
++		return false
++	}
++	now := time.Now()
++	_ = os.Chtimes(view, now, now)
++	return true
++}
++
++func (s *Store) build(ctx context.Context, storePath string) error {
++	base := path.Base(storePath)
++
++	// Realise first, registering a GC root in the same step so the closure
++	// cannot be collected between substitution and linking. The root lives
++	// as long as the view does.
++	gcRoot := filepath.Join(s.viewDir, gcRootsDirName, base)
++	if _, err := s.run(ctx, "--realise", storePath, "--add-root", gcRoot); err != nil {
++		return fmt.Errorf("while realising %q: %w", storePath, err)
++	}
++	out, err := s.run(ctx, "--query", "--requisites", storePath)
++	if err != nil {
++		return fmt.Errorf("while querying the closure of %q: %w", storePath, err)
++	}
++	closure := strings.Fields(string(out))
++	hasRoot := false
++	for _, p := range closure {
++		// The daemon's answer is trusted for content, not for shape: every
++		// path is joined below, so each must be a plain store path.
++		if !nixref.IsStorePath(p) {
++			return fmt.Errorf("closure of %q lists %q, which is not a store path", storePath, p)
++		}
++		hasRoot = hasRoot || p == storePath
++	}
++	if !hasRoot {
++		return fmt.Errorf("closure of %q does not include the path itself", storePath)
++	}
++
++	tmp, err := os.MkdirTemp(filepath.Join(s.viewDir, tmpDirName), base+"-*")
++	if err != nil {
++		return fmt.Errorf("while creating view temp dir: %w", err)
++	}
++	defer removeAll(tmp) // no-op once the rename succeeds
++	if err := os.Chmod(tmp, 0o755); err != nil {
++		return err
++	}
++	fsDir := filepath.Join(tmp, layerFSDirName)
++	if err := os.MkdirAll(filepath.Join(fsDir, LogicalStoreDir), 0o755); err != nil {
++		return err
++	}
++	for _, p := range closure {
++		name := path.Base(p)
++		if err := linkTree(filepath.Join(s.storeDir, name), filepath.Join(fsDir, LogicalStoreDir, name)); err != nil {
++			return fmt.Errorf("while linking %q into the view: %w", p, err)
++		}
++	}
++	if err := populateRoot(fsDir, base); err != nil {
++		return fmt.Errorf("while laying out the root of %q: %w", storePath, err)
++	}
++
++	final := filepath.Join(s.viewDir, viewsDirName, base)
++	if err := os.Rename(tmp, final); err != nil {
++		return fmt.Errorf("while moving view into place: %w", err)
++	}
++	return nil
++}
++
++// linkTree reproduces the tree at src under dst: directories are created,
++// regular files hard-linked, symlinks copied. Anything else is an error; a
++// store path holds nothing else.
++func linkTree(src, dst string) error {
++	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
++		if err != nil {
++			return err
++		}
++		rel, err := filepath.Rel(src, p)
++		if err != nil {
++			return err
++		}
++		target := filepath.Join(dst, rel)
++		switch {
++		case d.IsDir():
++			// Writable by the owner so the view can be removed again; the
++			// actor sees it through a read-only lowerdir either way.
++			return os.Mkdir(target, 0o755)
++		case d.Type()&fs.ModeSymlink != 0:
++			link, err := os.Readlink(p)
++			if err != nil {
++				return err
++			}
++			return os.Symlink(link, target)
++		case d.Type().IsRegular():
++			if err := os.Link(p, target); err != nil {
++				if errors.Is(err, syscall.EXDEV) {
++					return fmt.Errorf("%w (the nix view dir must be on the same mount as the nix store)", err)
++				}
++				return err
++			}
++			return nil
++		default:
++			return fmt.Errorf("%q is neither a directory, a regular file, nor a symlink", p)
++		}
++	})
++}
++
++// populateRoot gives the view a conventional root from the closure's root
++// path: each top-level directory of the root path becomes a real directory
++// whose entries link into the store, so /bin/sh, /etc/passwd and the like
++// resolve, and the worker can still add its own files (resolv.conf, bind
++// targets) beside them. The mount points every sandbox expects are created
++// too.
++func populateRoot(fsDir, rootBase string) error {
++	rootRel := path.Join(LogicalStoreDir, rootBase)
++	_, rootInfo, err := resolveInTree(fsDir, rootRel)
++	if err != nil {
++		return err
++	}
++	if rootInfo.IsDir() {
++		rootDir := filepath.Join(fsDir, rootRel)
++		entries, err := os.ReadDir(rootDir)
++		if err != nil {
++			return err
++		}
++		for _, e := range entries {
++			name := e.Name()
++			if name == "nix" || name == ConfigFileName {
++				continue
++			}
++			_, info, err := resolveInTree(fsDir, path.Join(rootRel, name))
++			if err != nil {
++				if errors.Is(err, fs.ErrNotExist) {
++					continue // dangling link in the root path
++				}
++				return err
++			}
++			if !info.IsDir() {
++				if err := os.Symlink(path.Join(rootRel, name), filepath.Join(fsDir, name)); err != nil {
++					return err
++				}
++				continue
++			}
++			if err := os.Mkdir(filepath.Join(fsDir, name), 0o755); err != nil {
++				return err
++			}
++			childDir, _, err := resolveInTree(fsDir, path.Join(rootRel, name))
++			if err != nil {
++				return err
++			}
++			children, err := os.ReadDir(childDir)
++			if err != nil {
++				return err
++			}
++			for _, c := range children {
++				if err := os.Symlink(path.Join(rootRel, name, c.Name()), filepath.Join(fsDir, name, c.Name())); err != nil {
++					return err
++				}
++			}
++		}
++	}
++	for _, d := range []struct {
++		name string
++		mode fs.FileMode
++	}{{"proc", 0o555}, {"sys", 0o555}, {"dev", 0o755}, {"etc", 0o755}, {"tmp", 0o777 | fs.ModeSticky}} {
++		p := filepath.Join(fsDir, d.name)
++		if err := os.Mkdir(p, 0o755); err != nil {
++			if errors.Is(err, fs.ErrExist) {
++				continue
++			}
++			return err
++		}
++		if err := os.Chmod(p, d.mode); err != nil {
++			return err
++		}
++	}
++	// atelet resolves the image user from these two files without following
++	// links out of the layer, so they must be real files in the view.
++	for _, name := range []string{"etc/passwd", "etc/group"} {
++		src, info, err := resolveInTree(fsDir, name)
++		if err != nil || !info.Mode().IsRegular() {
++			continue
++		}
++		dst := filepath.Join(fsDir, name)
++		if src == dst {
++			continue
++		}
++		if err := os.Remove(dst); err != nil {
++			return err
++		}
++		if err := os.Link(src, dst); err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
++// resolveInTree resolves name inside root the way a process chrooted there
++// would: absolute symlink targets restart at root, and ".." never climbs
++// above it. It returns the host path of the final, non-symlink entry.
++func resolveInTree(root, name string) (string, fs.FileInfo, error) {
++	remaining := strings.Split(name, "/")
++	var resolved []string
++	hops := 0
++	for len(remaining) > 0 {
++		c := remaining[0]
++		remaining = remaining[1:]
++		switch c {
++		case "", ".":
++			continue
++		case "..":
++			if len(resolved) > 0 {
++				resolved = resolved[:len(resolved)-1]
++			}
++			continue
++		}
++		p := filepath.Join(root, filepath.Join(resolved...), c)
++		info, err := os.Lstat(p)
++		if err != nil {
++			return "", nil, err
++		}
++		if info.Mode()&fs.ModeSymlink != 0 {
++			if hops++; hops > maxSymlinkHops {
++				return "", nil, &fs.PathError{Op: "resolve", Path: name, Err: syscall.ELOOP}
++			}
++			target, err := os.Readlink(p)
++			if err != nil {
++				return "", nil, err
++			}
++			if strings.HasPrefix(target, "/") {
++				resolved = nil
++			}
++			remaining = append(strings.Split(target, "/"), remaining...)
++			continue
++		}
++		if len(remaining) > 0 && !info.IsDir() {
++			return "", nil, &fs.PathError{Op: "resolve", Path: name, Err: syscall.ENOTDIR}
++		}
++		resolved = append(resolved, c)
++	}
++	p := filepath.Join(root, filepath.Join(resolved...))
++	info, err := os.Lstat(p)
++	if err != nil {
++		return "", nil, err
++	}
++	return p, info, nil
++}
++
++// readConfig reads the optional image config from the closure's root path.
++func readConfig(fsDir, rootBase string) (v1.Config, error) {
++	var cfg v1.Config
++	p, info, err := resolveInTree(fsDir, path.Join(LogicalStoreDir, rootBase, ConfigFileName))
++	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
++		return cfg, nil
++	}
++	if err != nil {
++		return cfg, fmt.Errorf("while resolving %s: %w", ConfigFileName, err)
++	}
++	if !info.Mode().IsRegular() {
++		return cfg, fmt.Errorf("%s is not a regular file", ConfigFileName)
++	}
++	f, err := os.Open(p)
++	if err != nil {
++		return cfg, err
++	}
++	defer f.Close()
++	b, err := io.ReadAll(io.LimitReader(f, maxConfigSize+1))
++	if err != nil {
++		return cfg, err
++	}
++	if len(b) > maxConfigSize {
++		return cfg, fmt.Errorf("%s exceeds %d bytes", ConfigFileName, maxConfigSize)
++	}
++	if err := json.Unmarshal(b, &cfg); err != nil {
++		return cfg, fmt.Errorf("while decoding %s: %w", ConfigFileName, err)
++	}
++	return cfg, nil
++}
++
++// EvictUnused removes every view that no bundle uses and that has not been
++// used for the minimum age, together with its GC root. inUse holds the base
++// names of the layer directories referenced by bundle overlay specs (see
++// imagecache.RootSet.LayerHexes). It returns the number of views removed.
++func (s *Store) EvictUnused(inUse map[string]bool) (int, error) {
++	viewsDir := filepath.Join(s.viewDir, viewsDirName)
++	entries, err := os.ReadDir(viewsDir)
++	if err != nil {
++		return 0, fmt.Errorf("while listing nix views: %w", err)
++	}
++	var (
++		removed int
++		errs    []error
++	)
++	for _, e := range entries {
++		base := e.Name()
++		if inUse[base] {
++			continue
++		}
++		trash, err := s.retire(base)
++		if err != nil {
++			errs = append(errs, err)
++			continue
++		}
++		if trash == "" {
++			continue
++		}
++		if err := removeAll(trash); err != nil {
++			errs = append(errs, err)
++			continue
++		}
++		removed++
++	}
++	return removed, errors.Join(errs...)
++}
++
++// retire moves an old-enough view out of the way and drops its GC root. It
++// returns the directory to delete, or "" if the view is too young.
++func (s *Store) retire(base string) (string, error) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	view := filepath.Join(s.viewDir, viewsDirName, base)
++	info, err := os.Stat(view)
++	if err != nil {
++		if errors.Is(err, fs.ErrNotExist) {
++			return "", nil
++		}
++		return "", err
++	}
++	if time.Since(info.ModTime()) < s.minAge {
++		return "", nil
++	}
++	trash, err := os.MkdirTemp(filepath.Join(s.viewDir, tmpDirName), "evict-*")
++	if err != nil {
++		return "", err
++	}
++	if err := os.Rename(view, filepath.Join(trash, base)); err != nil {
++		_ = os.Remove(trash)
++		return "", err
++	}
++	if err := os.Remove(filepath.Join(s.viewDir, gcRootsDirName, base)); err != nil && !errors.Is(err, fs.ErrNotExist) {
++		return trash, err
++	}
++	return trash, nil
++}
++
++// removeAll deletes dir, restoring write permission on directories first so
++// modes set inside a view cannot block the removal.
++func removeAll(dir string) error {
++	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
++		if err != nil {
++			return err
++		}
++		if d.IsDir() {
++			return os.Chmod(p, 0o700)
++		}
++		return nil
++	})
++	if err != nil && !errors.Is(err, fs.ErrNotExist) {
++		return err
++	}
++	return os.RemoveAll(dir)
++}
+diff --git a/internal/niximage/niximage_test.go b/internal/niximage/niximage_test.go
+new file mode 100644
+index 00000000..0b285de4
+--- /dev/null
++++ b/internal/niximage/niximage_test.go
+@@ -0,0 +1,315 @@
++// Copyright 2026 The Agent Substrate Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package niximage
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"os"
++	"path/filepath"
++	"slices"
++	"strings"
++	"testing"
++	"time"
++)
++
++const (
++	envBase   = "0c0zb1l7mqvdrsgjq7b9vl0g9cyfh3q1-agent-env"
++	bashBase  = "1b1zb1l7mqvdrsgjq7b9vl0g9cyfh3q2-bash-5.3"
++	etcBase   = "2c2zb1l7mqvdrsgjq7b9vl0g9cyfh3q3-etc"
++	otherBase = "3d3zb1l7mqvdrsgjq7b9vl0g9cyfh3q4-other-tenant"
++	envPath   = LogicalStoreDir + "/" + envBase
++)
++
++// fakeNode is a store directory plus a nix-store stand-in that answers for it.
++type fakeNode struct {
++	storeDir string
++	closure  []string
++	calls    [][]string
++	fail     error
++}
++
++func (n *fakeNode) run(_ context.Context, args ...string) ([]byte, error) {
++	n.calls = append(n.calls, args)
++	if n.fail != nil {
++		return nil, n.fail
++	}
++	if args[0] == "--query" {
++		return []byte(strings.Join(n.closure, "\n") + "\n"), nil
++	}
++	return nil, nil
++}
++
++func writeFile(t *testing.T, path, content string, mode os.FileMode) {
++	t.Helper()
++	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(path, []byte(content), mode); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func symlink(t *testing.T, target, path string) {
++	t.Helper()
++	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Symlink(target, path); err != nil {
++		t.Fatal(err)
++	}
++}
++
++// newFakeNode lays out a closure shaped like a buildEnv: the root path's bin
++// and etc are links into other store paths, by absolute /nix/store targets.
++// A fourth path belongs to no closure.
++func newFakeNode(t *testing.T) (*fakeNode, string) {
++	t.Helper()
++	base := t.TempDir()
++	store := filepath.Join(base, "store")
++	writeFile(t, filepath.Join(store, bashBase, "bin", "bash"), "#!bash", 0o555)
++	symlink(t, "bash", filepath.Join(store, bashBase, "bin", "sh"))
++	writeFile(t, filepath.Join(store, etcBase, "etc", "passwd"), "agent:x:1000:1000::/home/agent:/bin/sh\n", 0o444)
++	symlink(t, LogicalStoreDir+"/"+bashBase+"/bin", filepath.Join(store, envBase, "bin"))
++	symlink(t, LogicalStoreDir+"/"+etcBase+"/etc", filepath.Join(store, envBase, "etc"))
++	writeFile(t, filepath.Join(store, envBase, ConfigFileName),
++		`{"Entrypoint":["/bin/sh"],"Env":["PATH=/bin"],"WorkingDir":"/work","User":"agent"}`, 0o444)
++	writeFile(t, filepath.Join(store, otherBase, "secret"), "other tenant", 0o444)
++	return &fakeNode{
++		storeDir: store,
++		closure:  []string{LogicalStoreDir + "/" + bashBase, LogicalStoreDir + "/" + etcBase, envPath},
++	}, filepath.Join(base, "views")
++}
++
++func newStore(t *testing.T, node *fakeNode, viewDir string, opts ...Option) *Store {
++	t.Helper()
++	s, err := New(viewDir, append([]Option{WithStoreDir(node.storeDir), WithRunner(node.run)}, opts...)...)
++	if err != nil {
++		t.Fatalf("New: %v", err)
++	}
++	return s
++}
++
++func TestEnsureImageBuildsClosureView(t *testing.T) {
++	node, viewDir := newFakeNode(t)
++	s := newStore(t, node, viewDir, WithMountDir("/var/lib/ate/nix-views"))
++
++	img, workerLayers, err := s.EnsureImage(t.Context(), envPath)
++	if err != nil {
++		t.Fatalf("EnsureImage: %v", err)
++	}
++
++	if want := []string{"/var/lib/ate/nix-views/views/" + envBase}; !slices.Equal(workerLayers, want) {
++		t.Errorf("worker layers = %v, want %v (rooted at the workers' mount dir)", workerLayers, want)
++	}
++	if got := img.Config.Entrypoint; !slices.Equal(got, []string{"/bin/sh"}) {
++		t.Errorf("Config.Entrypoint = %v, want [/bin/sh]", got)
++	}
++	if img.Config.WorkingDir != "/work" || img.Config.User != "agent" {
++		t.Errorf("Config = %+v, want WorkingDir /work and User agent", img.Config)
++	}
++
++	fsDir := filepath.Join(viewDir, "views", envBase, "fs")
++
++	// A file in the view is the store's own inode, not a copy.
++	storeFile, err := os.Stat(filepath.Join(node.storeDir, bashBase, "bin", "bash"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	viewFile, err := os.Stat(filepath.Join(fsDir, "nix", "store", bashBase, "bin", "bash"))
++	if err != nil {
++		t.Fatalf("closure path missing from view: %v", err)
++	}
++	if !os.SameFile(storeFile, viewFile) {
++		t.Error("view file is a copy of the store file, want a hard link")
++	}
++
++	// Symlinks inside store paths are kept as they are.
++	if link, err := os.Readlink(filepath.Join(fsDir, "nix", "store", bashBase, "bin", "sh")); err != nil || link != "bash" {
++		t.Errorf("Readlink(bin/sh) = %q, %v; want \"bash\"", link, err)
++	}
++
++	// The root path's directories are real directories whose entries point
++	// into the store, so the worker can add files beside them.
++	if info, err := os.Lstat(filepath.Join(fsDir, "bin")); err != nil || !info.IsDir() {
++		t.Fatalf("/bin in view: %v, %v; want a real directory", info, err)
++	}
++	if link, err := os.Readlink(filepath.Join(fsDir, "bin", "bash")); err != nil || link != envPath+"/bin/bash" {
++		t.Errorf("Readlink(/bin/bash) = %q, %v; want %q", link, err, envPath+"/bin/bash")
++	}
++
++	// atelet reads /etc/passwd without following links out of the layer.
++	b, err := img.ReadFile("etc/passwd")
++	if err != nil {
++		t.Fatalf("img.ReadFile(etc/passwd): %v", err)
++	}
++	if !strings.HasPrefix(string(b), "agent:x:1000:") {
++		t.Errorf("etc/passwd = %q", b)
++	}
++
++	for _, d := range []string{"proc", "sys", "dev", "tmp"} {
++		if info, err := os.Stat(filepath.Join(fsDir, d)); err != nil || !info.IsDir() {
++			t.Errorf("view lacks mount point /%s: %v", d, err)
++		}
++	}
++
++	// Only the closure is visible: nothing else from the node's store.
++	if _, err := os.Lstat(filepath.Join(fsDir, "nix", "store", otherBase)); !errors.Is(err, os.ErrNotExist) {
++		t.Errorf("path outside the closure is in the view (err = %v)", err)
++	}
++
++	if want := []string{"--realise", envPath, "--add-root", filepath.Join(viewDir, "gcroots", envBase)}; !slices.Equal(node.calls[0], want) {
++		t.Errorf("first nix-store call = %v, want %v", node.calls[0], want)
++	}
++}
++
++func TestEnsureImageReusesView(t *testing.T) {
++	node, viewDir := newFakeNode(t)
++	s := newStore(t, node, viewDir)
++	if _, _, err := s.EnsureImage(t.Context(), envPath); err != nil {
++		t.Fatalf("EnsureImage: %v", err)
++	}
++	calls := len(node.calls)
++
++	// A hit must not depend on the daemon or on the store path surviving:
++	// the view keeps the closure's files alive by itself.
++	node.fail = errors.New("daemon down")
++	if err := os.RemoveAll(filepath.Join(node.storeDir, bashBase)); err != nil {
++		t.Fatal(err)
++	}
++	img, _, err := s.EnsureImage(t.Context(), envPath)
++	if err != nil {
++		t.Fatalf("EnsureImage on an existing view: %v", err)
++	}
++	if len(node.calls) != calls {
++		t.Errorf("a cache hit ran nix-store %d more times", len(node.calls)-calls)
++	}
++	b, err := os.ReadFile(filepath.Join(viewDir, "views", envBase, "fs", "nix", "store", bashBase, "bin", "bash"))
++	if err != nil || string(b) != "#!bash" {
++		t.Errorf("view file after its store path was deleted = %q, %v", b, err)
++	}
++	if img.Config.User != "agent" {
++		t.Errorf("Config.User on a hit = %q, want agent", img.Config.User)
++	}
++}
++
++func TestEnsureImageFailures(t *testing.T) {
++	tests := []struct {
++		name    string
++		path    string
++		mutate  func(*fakeNode)
++		wantErr string
++	}{
++		{"not a store path", "/etc/passwd", nil, "invalid nix store path"},
++		{"substitution fails", envPath, func(n *fakeNode) { n.fail = errors.New("no signature trusted") }, "no signature trusted"},
++		{"closure lists a path outside the store", envPath, func(n *fakeNode) { n.closure = append(n.closure, "/nix/store/../../etc") }, "not a store path"},
++		{"closure omits the root", envPath, func(n *fakeNode) { n.closure = n.closure[:2] }, "does not include the path itself"},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			node, viewDir := newFakeNode(t)
++			if tc.mutate != nil {
++				tc.mutate(node)
++			}
++			s := newStore(t, node, viewDir)
++			_, _, err := s.EnsureImage(t.Context(), tc.path)
++			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
++				t.Fatalf("EnsureImage error = %v, want one containing %q", err, tc.wantErr)
++			}
++			// A failed build leaves no view a later call could mistake for complete.
++			if entries, _ := os.ReadDir(filepath.Join(viewDir, "views")); len(entries) != 0 {
++				t.Errorf("failed build left %d views behind", len(entries))
++			}
++		})
++	}
++}
++
++func TestRootLinksCannotEscapeTheView(t *testing.T) {
++	node, viewDir := newFakeNode(t)
++	// A closure whose root tries to pass the host's files off as its own.
++	outside := filepath.Join(t.TempDir(), "host-etc")
++	writeFile(t, filepath.Join(outside, "passwd"), "root:x:0:0::/root:/bin/sh\n", 0o444)
++	if err := os.Remove(filepath.Join(node.storeDir, envBase, "etc")); err != nil {
++		t.Fatal(err)
++	}
++	symlink(t, "../../../../../../../../../../.."+outside, filepath.Join(node.storeDir, envBase, "etc"))
++	if err := os.Remove(filepath.Join(node.storeDir, envBase, ConfigFileName)); err != nil {
++		t.Fatal(err)
++	}
++	symlink(t, fmt.Sprintf("../../../../../../../../../..%s/passwd", outside), filepath.Join(node.storeDir, envBase, ConfigFileName))
++
++	s := newStore(t, node, viewDir)
++	img, _, err := s.EnsureImage(t.Context(), envPath)
++	if err != nil {
++		t.Fatalf("EnsureImage: %v", err)
++	}
++	if b, err := img.ReadFile("etc/passwd"); err == nil {
++		t.Errorf("read the host's passwd through the view: %q", b)
++	}
++	if len(img.Config.Entrypoint) != 0 || img.Config.User != "" {
++		t.Errorf("config was read from outside the view: %+v", img.Config)
++	}
++}
++
++func TestEvictUnused(t *testing.T) {
++	node, viewDir := newFakeNode(t)
++	s := newStore(t, node, viewDir, WithMinAge(time.Hour))
++	if _, _, err := s.EnsureImage(t.Context(), envPath); err != nil {
++		t.Fatalf("EnsureImage: %v", err)
++	}
++	view := filepath.Join(viewDir, "views", envBase)
++	gcRoot := filepath.Join(viewDir, "gcroots", envBase)
++	// The fake nix-store does not create the root; stand in for it.
++	symlink(t, envPath, gcRoot)
++	exists := func(p string) bool { _, err := os.Lstat(p); return err == nil }
++
++	if n, err := s.EvictUnused(nil); err != nil || n != 0 || !exists(view) {
++		t.Fatalf("EvictUnused on a young view = %d, %v (view exists: %v); want it kept", n, err, exists(view))
++	}
++
++	old := time.Now().Add(-2 * time.Hour)
++	if err := os.Chtimes(view, old, old); err != nil {
++		t.Fatal(err)
++	}
++	if n, err := s.EvictUnused(map[string]bool{envBase: true}); err != nil || n != 0 || !exists(view) {
++		t.Fatalf("EvictUnused on a view in use = %d, %v (view exists: %v); want it kept", n, err, exists(view))
++	}
++
++	if n, err := s.EvictUnused(nil); err != nil || n != 1 {
++		t.Fatalf("EvictUnused = %d, %v; want 1 removed", n, err)
++	}
++	if exists(view) || exists(gcRoot) {
++		t.Errorf("after eviction: view exists %v, gc root exists %v; want both gone", exists(view), exists(gcRoot))
++	}
++	// The store itself is untouched: eviction removes links, not content.
++	if b, err := os.ReadFile(filepath.Join(node.storeDir, bashBase, "bin", "bash")); err != nil || string(b) != "#!bash" {
++		t.Errorf("store file after eviction = %q, %v", b, err)
++	}
++
++	// An evicted view is rebuilt on demand.
++	if _, _, err := s.EnsureImage(t.Context(), envPath); err != nil || !exists(view) {
++		t.Errorf("EnsureImage after eviction: %v (view exists: %v)", err, exists(view))
++	}
++}
++
++func TestNewClearsUnfinishedViews(t *testing.T) {
++	node, viewDir := newFakeNode(t)
++	writeFile(t, filepath.Join(viewDir, "tmp", envBase+"-123", "fs", "half"), "x", 0o444)
++	newStore(t, node, viewDir)
++	if entries, err := os.ReadDir(filepath.Join(viewDir, "tmp")); err != nil || len(entries) != 0 {
++		t.Errorf("tmp after New holds %d entries (%v), want none", len(entries), err)
++	}
++}
+diff --git a/internal/nixref/nixref.go b/internal/nixref/nixref.go
+new file mode 100644
+index 00000000..06da30b6
+--- /dev/null
++++ b/internal/nixref/nixref.go
+@@ -0,0 +1,60 @@
++// Copyright 2026 The Agent Substrate Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// Package nixref parses image references that name a Nix store path instead
++// of an OCI image. It has no dependencies so API validation can share it with
++// the node-side image source (internal/niximage).
++package nixref
++
++import (
++	"fmt"
++	"regexp"
++	"strings"
++)
++
++const (
++	// Scheme prefixes an image reference that names a Nix store path.
++	Scheme = "nix:"
++
++	// StoreDir is the only store directory a reference may name, and where
++	// the closure appears inside the actor. Store paths embed it, so it is
++	// not configurable.
++	StoreDir = "/nix/store"
++)
++
++// storePathBase matches the base name of a store path: a 32-character
++// nix-base32 hash, a dash, and a name of the characters Nix allows, not
++// starting with a dot.
++var storePathBase = regexp.MustCompile(`^[0-9abcdfghijklmnpqrsvwxyz]{32}-[A-Za-z0-9+_?=-][A-Za-z0-9+._?=-]{0,210}$`)
++
++// Parse reports whether ref is a Nix image reference and, if so, returns the
++// store path it names. A reference with the nix: scheme that does not name a
++// well-formed store path directly under /nix/store is an error.
++func Parse(ref string) (storePath string, isNix bool, err error) {
++	rest, ok := strings.CutPrefix(ref, Scheme)
++	if !ok {
++		return "", false, nil
++	}
++	if !IsStorePath(rest) {
++		return "", true, fmt.Errorf("nix image reference %q: want %s%s/<hash>-<name>", ref, Scheme, StoreDir)
++	}
++	return rest, true, nil
++}
++
++// IsStorePath reports whether p is a well-formed path directly under
++// /nix/store.
++func IsStorePath(p string) bool {
++	base, ok := strings.CutPrefix(p, StoreDir+"/")
++	return ok && storePathBase.MatchString(base)
++}
+diff --git a/internal/resources/validate.go b/internal/resources/validate.go
+index cff8d9ec..b50497e6 100644
+--- a/internal/resources/validate.go
++++ b/internal/resources/validate.go
+@@ -30,6 +30,7 @@ import (
+ 
+ 	"github.com/distribution/reference"
+ 	"go.ate.dev/substrate/internal/apierror"
++	"go.ate.dev/substrate/internal/nixref"
+ 	"go.ate.dev/substrate/internal/nodepath"
+ 	"go.ate.dev/substrate/internal/proto/ateworkerpb"
+ 	"go.ate.dev/substrate/internal/protoredact"
+@@ -388,15 +389,24 @@ func ValidateUUID(uuid string, fldPath *field.Path) field.ErrorList {
+ 	return nil
+ }
+ 
+-// ValidatePinnedImage requires a well-formed OCI image reference pinned by
+-// digest (e.g. "name@sha256:..."): changing the image content under a fixed
+-// reference invalidates snapshots. It parses with the same grammar the
+-// container runtimes use, so a malformed digest is rejected rather than
+-// treated as pinned.
++// ValidatePinnedImage requires an image reference whose content cannot change
++// under it, since that would invalidate snapshots. Two forms qualify:
++//
++//   - a well-formed OCI image reference pinned by digest (e.g.
++//     "name@sha256:..."), parsed with the same grammar the container runtimes
++//     use, so a malformed digest is rejected rather than treated as pinned;
++//   - a Nix store path, "nix:/nix/store/<hash>-<name>", whose hash names its
++//     content.
+ func ValidatePinnedImage(fldPath *field.Path, value string) field.ErrorList {
+ 	if value == "" {
+ 		return nil
+ 	}
++	if _, isNix, err := nixref.Parse(value); isNix {
++		if err != nil {
++			return field.ErrorList{field.Invalid(fldPath, value, fmt.Sprintf("must be a well-formed nix store path: %v", err))}
++		}
++		return nil
++	}
+ 	ref, err := reference.ParseNormalizedNamed(value)
+ 	if err != nil {
+ 		return field.ErrorList{field.Invalid(fldPath, value, fmt.Sprintf("must be a well-formed image reference: %v", err))}
+diff --git a/internal/resources/validate_test.go b/internal/resources/validate_test.go
+index f28777df..96ab5583 100644
+--- a/internal/resources/validate_test.go
++++ b/internal/resources/validate_test.go
+@@ -485,6 +485,11 @@ func TestValidatePinnedImage(t *testing.T) {
+ 		{"tag only", "example.com/app:v1", true},
+ 		{"malformed digest", "example.com/app@sha256:abc", true},
+ 		{"malformed reference", "Example.com/App", true},
++		{"nix store path", "nix:/nix/store/0c0zb1l7mqvdrsgjq7b9vl0g9cyfh3q1-agent-env", false},
++		{"nix path outside the store", "nix:/etc/0c0zb1l7mqvdrsgjq7b9vl0g9cyfh3q1-agent-env", true},
++		{"nix path below a store path", "nix:/nix/store/0c0zb1l7mqvdrsgjq7b9vl0g9cyfh3q1-agent-env/bin", true},
++		{"nix path with traversal", "nix:/nix/store/../../etc/passwd", true},
++		{"nix path with a bad hash", "nix:/nix/store/agent-env", true},
+ 	})
+ }
+ 
