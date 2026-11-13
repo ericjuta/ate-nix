@@ -53,7 +53,9 @@ grep -q snapshotTime <<<"${status}" || fail "no golden snapshot: ${status}"
 
 echo "== actor"
 ate create actor "${actor}" -a ate-nix-proof --template "${template}" >/dev/null
-ate proxy actor "${actor}" "${PORT}:80" -a ate-nix-proof >/dev/null &
+# Not through ate(): its stderr filter runs the command in a subshell, and
+# killing that subshell would leave the proxy running.
+kubectl ate --context "${CONTEXT}" proxy actor "${actor}" "${PORT}:80" -a ate-nix-proof >/dev/null 2>&1 &
 proxy_pid=$!
 url="http://127.0.0.1:${PORT}/cgi-bin/info"
 before=""
