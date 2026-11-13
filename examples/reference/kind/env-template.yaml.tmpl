@@ -1,0 +1,23 @@
+# The template the env service (ate-env-api) starts environments from: the
+# agent image, in the env service's own atespace and worker pool. Fill in
+# AGENT_IMAGE with envsubst and pass the result to
+# `kubectl ate create actor-template -f -`.
+metadata:
+  atespace: ate-env
+  name: default-template
+workerSelector:
+  matchLabels:
+    workload: ate-env
+containers:
+- name: agent
+  image: nix:${AGENT_IMAGE}
+  wakeupProbe:
+    httpGet:
+      path: /readyz
+      port: 80
+resources:
+  limits:
+    cpuMillicores: 500
+    memoryBytes: 536870912 # 512Mi
+snapshotConfig:
+  preferredFidelity: SNAPSHOT_FIDELITY_MEMORY

@@ -54,4 +54,5 @@ A second patch, `patches/env/0002-substrate-v1.0.0.patch`, changes only `go.mod`
 
 - The Go tests of the patched packages pass. The Nix build runs them.
 - `ate-env --help` from the build shows `--tty` and `--suspend-on-osc-7501-inactive`.
-- **Not tested here:** a terminal session against a live cluster. The gist's README reports one on the author's cluster with the original patch.
+- A terminal session against a live kind cluster passed on 2026-11-13: terminal size, resize, Ctrl-C, exit code, and the local terminal's settings after exit. [proof.md](proof.md) has the details.
+- **Not tested here:** `--suspend-on-osc-7501-inactive`.

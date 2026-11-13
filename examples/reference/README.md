@@ -52,8 +52,41 @@ Each template is ready when `kubectl ate get actor-template <name> -a ate-nix-pr
 
 On 2026-11-13 both booted this way. The runtime actor answered `{"service":"reference-app","path":"/orders/7"}`. In the agent actor, a client of the guest daemon's process API created a Go module under `/work`, and `go test ./...` passed with the image's Go 1.27.3; `git` worked; a command started in terminal mode got `/dev/pts/0` at 24x80 and returned its exit code 3. The runtime image's closure is 10 MB and the agent image's is 705 MB.
 
+## Open a terminal in the agent image
+
+The env service (`ate-env-api`) starts an environment from a template that you name, and that template can be a Nix image. So `ate-env <id> shell --tty` reaches the agent image with no change to env. On the same kind cluster:
+
+1. Build a container image of the patched `ate-env-api` and push it to the kind registry. This repository has no Nix output for that image. One way: take `bin/ate-env-api` from `nix build .#ate-env` (it is a static binary), `COPY` it into `gcr.io/distroless/static`, and push it to `localhost:5001`. Keep the digest reference that `docker push` prints.
+2. Deploy the env service. It reuses the worker image of the counter demo.
+
+   ```sh
+   ate-env manifest --replicas 2 --worker-image "$WORKER_IMAGE" \
+     --api-image localhost:5001/ate-env-api@sha256:<digest> | kubectl --context kind-ate-nix apply -f -
+   ```
+
+3. Let the env service in. The Substrate router takes calls only from identities on its list, and the Substrate API takes them only from principals with a role. Add `spiffe://cluster.local/ns/ate-env/sa/default` to `--ingress-allowed-spiffe-ids` of the `atenet-router` Deployment in `ate-system`. Then:
+
+   ```sh
+   kubectl ate --context kind-ate-nix create atespace ate-env
+   kubectl ate --context kind-ate-nix create access-policy -a ate-env -f examples/reference/kind/env-access-policy.yaml
+   kubectl --context kind-ate-nix -n ate-env rollout restart deploy/ate-env-api
+   ```
+
+4. Register the agent image as the template that the env service uses by default, and connect:
+
+   ```sh
+   envsubst < examples/reference/kind/env-template.yaml.tmpl | kubectl ate --context kind-ate-nix create actor-template -f -
+   kubectl --context kind-ate-nix port-forward -n ate-env svc/ate-env-api 7777:7777 &
+   ate-env create dev1
+   ate-env dev1 shell 'go version'
+   ate-env dev1 shell --tty sh
+   ```
+
+On 2026-11-13 this ran with the `ate-env` binary from the Nix build. `ate-env dev1 shell` printed Go 1.27.3 and git 2.56.0 from `/work`. A scripted terminal session with `shell --tty sh` got `/dev/pts/0`. The remote terminal had the size of the local one (40x120) and followed a resize to 30x100. `go test ./...` passed in a new module. Ctrl-C did not end the shell. `exit 3` came back as exit code 3, and the local terminal had its first settings again. After `ate-env suspend dev1`, the next command woke the environment and the files in `/work` were there.
+
 ## Limits
 
 - The agent cannot build Nix packages inside its actor. The actor has no Nix daemon and cannot change its image, by design. The agent edits code and runs `go test`. A separate job (CI) builds and signs the images.
-- The agent image has run as a plain Substrate actor, with a test client that talked to the guest daemon directly. Nobody has run the env service (`ate-env-api`) with a `nix:` guest image, so `ate-env <id> shell` against this image is untested. The env code requires an OCI digest only when the guest is mounted into a second image.
+- `ate-env manifest template` cannot write a template for a Nix image: it accepts OCI digest references only. Write the template yourself, as `kind/env-template.yaml.tmpl` does.
+- `--suspend-on-osc-7501-inactive` has not run against a cluster.
 - `aarch64-darwin` is not in `systems`: actor images are Linux.

@@ -1,0 +1,9 @@
+# Lets the env service (ServiceAccount default in namespace ate-env) manage
+# actors in the ate-env atespace. Pass it to
+# `kubectl ate create access-policy -a ate-env -f -`.
+metadata:
+  name: default
+bindings:
+- role: editor
+  members:
+  - user:system:serviceaccount:ate-env:default
