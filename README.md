@@ -59,6 +59,12 @@ New here? Start with [docs/README.md](docs/README.md).
 | [Maintaining](docs/maintaining.md) | Layout, pins, how to update and change a patch, how to contribute. |
 | [FAQ](docs/faq.md) | NixOS? nix-snapshotter? Production? |
 
+## Contribute, report, licence
+
+- To contribute: [CONTRIBUTING.md](CONTRIBUTING.md).
+- To report a vulnerability: [SECURITY.md](SECURITY.md). Do not open a public issue.
+- Licence: Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
 ## Credits
 
 - [Agent Substrate](https://github.com/agent-substrate/substrate) and [env](https://github.com/agent-substrate/env) are Apache-2.0 projects by their authors.

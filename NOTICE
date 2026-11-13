@@ -1,0 +1,23 @@
+ate-nix
+Copyright 2026 the ate-nix authors
+
+This repository is licensed under the Apache License, Version 2.0 (see
+LICENSE). It contains no copy of upstream source code. It contains patches
+to, and build instructions for, these projects:
+
+- Agent Substrate (https://github.com/agent-substrate/substrate),
+  Apache License 2.0, copyright its authors.
+- Agent Substrate Environment (https://github.com/agent-substrate/env),
+  Apache License 2.0, copyright its authors.
+
+patches/env/0001-pty-process-streams.patch is a rebased form of a patch by
+Samuel Huber:
+https://gist.github.com/SamuelLHuber/5d420731d5d6bbd034daa8f02eae9b96
+(revision a625acf1ae16dcc8015d10fed76cf7bd1a75d010). The patch changes
+Apache-2.0 code. The gist has no licence statement of its own, and its
+author has not yet confirmed the terms for his changes.
+
+patches/substrate/0001-atelet-nix-image-source.patch was written for this
+repository. It follows an idea by Samuel Huber. It is not his code.
+
+This project is not affiliated with Agent Substrate or its maintainers.

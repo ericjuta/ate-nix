@@ -90,7 +90,7 @@ nix build .#ate-env .#ate-substrate
 sh -n kind/node-setup.sh && bash -n kind/prove.sh kind/private-cache.sh
 ```
 
-There is no CI yet. Say in the pull request which of these you ran.
+CI (`.github/workflows/ci.yml`) runs these checks on each pull request, plus ShellCheck and a build of all images. CI does not start a cluster.
 
 - A change to the substrate patch needs the local proof (`kind/prove.sh`, `kind/private-cache.sh`). If you did not run it, say so.
 - Update [proof.md](proof.md) only with results that you saw. Put all other items in "Not proven".
@@ -102,4 +102,6 @@ The best outcome for both patches is that upstream accepts them and this reposit
 
 ## Licence
 
-Agent Substrate and env are Apache-2.0. The patches are changes to that code. This repository has no licence file yet, so do not assume a licence for the files that are original to this repository until one is added.
+This repository is Apache-2.0, the same licence as Agent Substrate and env: see [../LICENSE](../LICENSE) and [../NOTICE](../NOTICE). The patches are changes to that upstream code. A contribution that you send is under the same licence.
+
+One point is open. The gist that contains the original PTY patch has no licence statement. `NOTICE` records this.

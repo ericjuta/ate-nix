@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scripts:
+    name: shell scripts and manifests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Shell syntax
+        run: |
+          sh -n kind/node-setup.sh
+          bash -n kind/prove.sh kind/private-cache.sh
+      - name: ShellCheck
+        run: shellcheck --severity=warning kind/node-setup.sh kind/prove.sh kind/private-cache.sh
+      - name: JSON syntax
+        run: jq empty kind/atelet-nix.patch.json
+
+  build:
+    name: nix build (x86_64-linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+      - name: Evaluate the flake
+        run: nix flake check --no-build
+      # Applies each patch to its pinned upstream source, compiles, and runs
+      # the Go tests that the packages enable.
+      - name: Build the patched binaries
+        run: nix build -L .#ate-env .#ate-substrate
+      - name: Build the images
+        run: nix build -L .#example-image .#proof-image .#atelet-image .#ateapi-image
+      - name: Build the private-cache proof images
+        run: nix build -L --impure --file kind/private-images.nix --argstr nonce ci signed unsigned rogue
