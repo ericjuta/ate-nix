@@ -1,4 +1,4 @@
-From 5139c9103ccde628feb301fa5f8345f284f4d6c2 Mon Sep 17 00:00:00 2001
+From 5558a0dbea5b23fde3af2687628cae4104ac3f98 Mon Sep 17 00:00:00 2001
 From: Eric Juta <ericjohnjuta@gmail.com>
 Date: Fri, 13 Nov 2026 11:13:28 +0000
 Subject: [PATCH] atelet: run actors from Nix store paths
@@ -8,22 +8,38 @@ is served from the node's Nix store instead of an OCI registry. atelet asks
 the Nix daemon to substitute the closure, hard-links it into a per-closure
 view and hands that view to the worker through the existing overlay spec, so
 no image is built, pushed or pulled.
+
+When the daemon will not take the closure, the error starts with the reason:
+no configured cache has the path, a cache has it unsigned, or a cache has it
+signed only by keys the node does not trust, named from the cache's narinfo.
+nix-store's stderr tells a missing path from a refused one but not an
+unsigned path from an untrusted signature, so atelet reads the refused
+path's narinfo from the http(s) cache, bounded in time and size, and falls
+back to nix-store's error when it cannot.
+
+Nix prints a substituter URL's user name and password verbatim. Every
+nix-store error atelet returns has the userinfo and query of each URL
+redacted.
 ---
  cmd/atelet/imagevolume_test.go      |   6 +-
  cmd/atelet/main.go                  |  12 +-
  cmd/atelet/niximages.go             |  92 +++++
  cmd/atelet/oci.go                   |  55 ++-
- docs/guides/nix-images.md           | 137 +++++++
- internal/niximage/niximage.go       | 583 ++++++++++++++++++++++++++++
- internal/niximage/niximage_test.go  | 315 +++++++++++++++
+ docs/guides/nix-images.md           | 159 ++++++++
+ internal/niximage/niximage.go       | 589 ++++++++++++++++++++++++++++
+ internal/niximage/niximage_test.go  | 321 +++++++++++++++
+ internal/niximage/refusal.go        | 241 ++++++++++++
+ internal/niximage/refusal_test.go   | 212 ++++++++++
  internal/nixref/nixref.go           |  60 +++
  internal/resources/validate.go      |  20 +-
  internal/resources/validate_test.go |   5 +
- 10 files changed, 1263 insertions(+), 22 deletions(-)
+ 12 files changed, 1750 insertions(+), 22 deletions(-)
  create mode 100644 cmd/atelet/niximages.go
  create mode 100644 docs/guides/nix-images.md
  create mode 100644 internal/niximage/niximage.go
  create mode 100644 internal/niximage/niximage_test.go
+ create mode 100644 internal/niximage/refusal.go
+ create mode 100644 internal/niximage/refusal_test.go
  create mode 100644 internal/nixref/nixref.go
 
 diff --git a/cmd/atelet/imagevolume_test.go b/cmd/atelet/imagevolume_test.go
@@ -324,10 +340,10 @@ index c046a179..f3df3179 100644
  		})
 diff --git a/docs/guides/nix-images.md b/docs/guides/nix-images.md
 new file mode 100644
-index 00000000..23d3bd5e
+index 00000000..70f6aeac
 --- /dev/null
 +++ b/docs/guides/nix-images.md
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,159 @@
 +---
 +title: "Nix Images"
 +linkTitle: "Nix Images"
@@ -453,6 +469,28 @@ index 00000000..23d3bd5e
 +fails to start with an error saying so. Use a worker pool's node selector to
 +keep such templates on Nix nodes.
 +
++## When a node refuses an image
++
++If the node's daemon cannot substitute the closure, the template's golden
++snapshot fails with `GoldenActorCrashed`, and atelet's message starts with
++the reason:
++
++| Message starts with | Cause |
++|---|---|
++| `no binary cache configured on this node has /nix/store/...` | No cache in the daemon's `substituters` has the path. Push the closure to one. |
++| `no binary cache this node could reach has /nix/store/...` | The same, but at least one cache did not answer; nix-store's warnings follow. |
++| `binary cache <url> has /nix/store/..., but it carries no signature` | The cache has the path unsigned. Sign it (`nix store sign`) with a key in the node's `trusted-public-keys`. |
++| `binary cache <url> has /nix/store/..., signed only by keys this node does not trust: <names>` | The path is signed, but by none of the node's `trusted-public-keys`. The names are the key names from the cache's narinfo. |
++
++Nix itself only reports that a cache's copy is "not signed by any of the keys
++in 'trusted-public-keys'". To tell an unsigned path from one signed by an
++unknown key, atelet reads that path's narinfo from the cache, for `http` and
++`https` caches, within one 5-second budget and 64 KiB per narinfo. It never
++asks the daemon to take the path. nix-store's own error follows the reason;
++when atelet cannot read the narinfo or does not recognise nix-store's output,
++the message is nix-store's error alone. In every message the user name,
++password and query of a cache URL are shown as `[redacted]`.
++
 +## Garbage collection
 +
 +Each view registers a Nix GC root for its closure, so the Nix collector never
@@ -467,10 +505,10 @@ index 00000000..23d3bd5e
 +suspended actor references in your binary cache.
 diff --git a/internal/niximage/niximage.go b/internal/niximage/niximage.go
 new file mode 100644
-index 00000000..a0dba99b
+index 00000000..a8561bd1
 --- /dev/null
 +++ b/internal/niximage/niximage.go
-@@ -0,0 +1,583 @@
+@@ -0,0 +1,589 @@
 +// Copyright 2026 The Agent Substrate Authors
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -626,7 +664,7 @@ index 00000000..a0dba99b
 +		cmd.Stderr = &stderr
 +		out, err := cmd.Output()
 +		if err != nil {
-+			return nil, fmt.Errorf("%s %s: %w: %s", command, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
++			return nil, &commandError{command: command, args: args, err: err, stderr: stderr.String()}
 +		}
 +		return out, nil
 +	}
@@ -712,6 +750,12 @@ index 00000000..a0dba99b
 +	// as long as the view does.
 +	gcRoot := filepath.Join(s.viewDir, gcRootsDirName, base)
 +	if _, err := s.run(ctx, "--realise", storePath, "--add-root", gcRoot); err != nil {
++		var cmdErr *commandError
++		if errors.As(err, &cmdErr) {
++			if why := explainRealiseFailure(ctx, cmdErr.stderr); why != "" {
++				return fmt.Errorf("while realising %q: %s; %w", storePath, why, err)
++			}
++		}
 +		return fmt.Errorf("while realising %q: %w", storePath, err)
 +	}
 +	out, err := s.run(ctx, "--query", "--requisites", storePath)
@@ -1056,10 +1100,10 @@ index 00000000..a0dba99b
 +}
 diff --git a/internal/niximage/niximage_test.go b/internal/niximage/niximage_test.go
 new file mode 100644
-index 00000000..0b285de4
+index 00000000..fe2a4c21
 --- /dev/null
 +++ b/internal/niximage/niximage_test.go
-@@ -0,0 +1,315 @@
+@@ -0,0 +1,321 @@
 +// Copyright 2026 The Agent Substrate Authors
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -1102,12 +1146,18 @@ index 00000000..0b285de4
 +	closure  []string
 +	calls    [][]string
 +	fail     error
++	// realiseStderr, when set, makes --realise fail the way nix-store does,
++	// printing it on stderr.
++	realiseStderr string
 +}
 +
 +func (n *fakeNode) run(_ context.Context, args ...string) ([]byte, error) {
 +	n.calls = append(n.calls, args)
 +	if n.fail != nil {
 +		return nil, n.fail
++	}
++	if args[0] == "--realise" && n.realiseStderr != "" {
++		return nil, &commandError{command: "nix-store", args: args, err: errors.New("exit status 1"), stderr: n.realiseStderr}
 +	}
 +	if args[0] == "--query" {
 +		return []byte(strings.Join(n.closure, "\n") + "\n"), nil
@@ -1373,6 +1423,471 @@ index 00000000..0b285de4
 +	newStore(t, node, viewDir)
 +	if entries, err := os.ReadDir(filepath.Join(viewDir, "tmp")); err != nil || len(entries) != 0 {
 +		t.Errorf("tmp after New holds %d entries (%v), want none", len(entries), err)
++	}
++}
+diff --git a/internal/niximage/refusal.go b/internal/niximage/refusal.go
+new file mode 100644
+index 00000000..f42db5b2
+--- /dev/null
++++ b/internal/niximage/refusal.go
+@@ -0,0 +1,241 @@
++// Copyright 2026 The Agent Substrate Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package niximage
++
++import (
++	"bufio"
++	"context"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"net/url"
++	"path"
++	"regexp"
++	"slices"
++	"strings"
++	"time"
++
++	"go.ate.dev/substrate/internal/nixref"
++)
++
++// When the daemon will not substitute a path, nix-store ends with the same
++// error whether no cache has the path or a cache has it but the node does not
++// trust its signature. Its stderr tells the two apart: a missing path is
++// listed under "don't know how to build these paths:", a refused one gets an
++// "ignoring substitute" warning naming the cache. It does not say whether the
++// refused path was unsigned or signed by an untrusted key; only the cache's
++// narinfo for the path says that, so the diagnosis reads the Sig lines of
++// each refused path's narinfo. Lines are as printed by Nix 2.35.
++var (
++	refusedLine = regexp.MustCompile(`^warning: ignoring substitute for '(/nix/store/[^']+)' from '([^']+)', as it's not signed by any of the keys in 'trusted-public-keys'$`)
++	failedLine  = regexp.MustCompile(`^error: (?:path '/nix/store/[^']+' is required, but there is no substituter that can build it|some references of path '/nix/store/[^']+' could not be realised)$`)
++	keyName     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`)
++	urlInText   = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\s'"<>]+`)
++)
++
++const (
++	missingHeader  = "don't know how to build these paths:"
++	unreachableTag = "warning: unable to download "
++
++	// Bounds on the diagnosis: one deadline for all narinfo reads, a size
++	// cap on each, and caps on how much of it ends up in the message.
++	diagnoseTimeout = 5 * time.Second
++	maxNarinfoSize  = 64 << 10
++	maxRefusals     = 4
++	maxMissing      = 4
++	maxSigners      = 8
++)
++
++var narinfoClient = &http.Client{Timeout: diagnoseTimeout}
++
++// commandError is a failed nix-store run. Its message carries nix-store's
++// stderr with credentials in URLs redacted (Nix prints a substituter's
++// userinfo verbatim); the raw stderr stays here for diagnosis.
++type commandError struct {
++	command string
++	args    []string
++	err     error
++	stderr  string
++}
++
++func (e *commandError) Error() string {
++	return fmt.Sprintf("%s %s: %v: %s", e.command, strings.Join(e.args, " "), e.err, redactURLs(strings.TrimSpace(e.stderr)))
++}
++
++func (e *commandError) Unwrap() error { return e.err }
++
++// redactURLs elides the userinfo and the query of every URL in s, keeping
++// scheme, host, port and path, so a message still says which cache it means.
++func redactURLs(s string) string {
++	return urlInText.ReplaceAllStringFunc(s, redactURL)
++}
++
++func redactURL(raw string) string {
++	scheme, rest, _ := strings.Cut(raw, "://")
++	end := strings.IndexAny(rest, "/?#")
++	if end < 0 {
++		end = len(rest)
++	}
++	authority, tail := rest[:end], rest[end:]
++	if at := strings.LastIndexByte(authority, '@'); at >= 0 {
++		authority = "[redacted]@" + authority[at+1:]
++	}
++	if q := strings.IndexAny(tail, "?#"); q >= 0 {
++		tail = tail[:q] + "?[redacted]"
++	}
++	return scheme + "://" + authority + tail
++}
++
++// refusal is a path a cache offered and the daemon refused for its signature.
++type refusal struct {
++	storePath, cache string
++}
++
++// explainRealiseFailure says in plain words why the daemon would not
++// substitute a closure, from a failed realise's stderr. It returns "" when
++// the stderr does not show a substitution failure it recognises or when any
++// narinfo read fails; the caller then reports nix-store's own error.
++func explainRealiseFailure(ctx context.Context, stderr string) string {
++	var (
++		refused     []refusal
++		missing     []string
++		failed      bool
++		unreachable bool
++		inMissing   bool
++	)
++	sc := bufio.NewScanner(strings.NewReader(stderr))
++	sc.Buffer(nil, 64<<10)
++	for sc.Scan() {
++		line := sc.Text()
++		if inMissing {
++			if p, ok := strings.CutPrefix(line, "  "); ok && nixref.IsStorePath(p) {
++				missing = append(missing, p)
++				continue
++			}
++			inMissing = false
++		}
++		switch {
++		case line == missingHeader:
++			inMissing = true
++		case failedLine.MatchString(line):
++			failed = true
++		case strings.HasPrefix(line, unreachableTag):
++			unreachable = true
++		default:
++			if m := refusedLine.FindStringSubmatch(line); m != nil && nixref.IsStorePath(m[1]) {
++				refused = append(refused, refusal{storePath: m[1], cache: m[2]})
++			}
++		}
++	}
++	if sc.Err() != nil || !failed || len(refused)+len(missing) == 0 {
++		return ""
++	}
++
++	ctx, cancel := context.WithTimeout(ctx, diagnoseTimeout)
++	defer cancel()
++	var parts []string
++	for i, r := range refused {
++		if i == maxRefusals {
++			parts = append(parts, fmt.Sprintf("%d more refused paths", len(refused)-i))
++			break
++		}
++		signers, err := narinfoSigners(ctx, r.cache, r.storePath)
++		if err != nil {
++			return ""
++		}
++		cache := redactURL(r.cache)
++		if len(signers) == 0 {
++			parts = append(parts, fmt.Sprintf("binary cache %s has %s, but it carries no signature", cache, r.storePath))
++		} else {
++			parts = append(parts, fmt.Sprintf("binary cache %s has %s, signed only by keys this node does not trust: %s", cache, r.storePath, strings.Join(signers, ", ")))
++		}
++	}
++	if len(refused) > 0 {
++		parts[len(parts)-1] += " (the node takes only paths signed by a key in its trusted-public-keys)"
++	}
++	if len(missing) > 0 {
++		where := "no binary cache configured on this node has"
++		if unreachable {
++			where = "no binary cache this node could reach has"
++		}
++		list := missing
++		if len(list) > maxMissing {
++			list = append(list[:maxMissing:maxMissing], fmt.Sprintf("%d more", len(missing)-maxMissing))
++		}
++		parts = append(parts, where+" "+strings.Join(list, ", "))
++	}
++	return strings.Join(parts, "; ")
++}
++
++// narinfoSigners reads storePath's narinfo from an http(s) binary cache and
++// returns the names of the keys that signed it, which a narinfo publishes.
++func narinfoSigners(ctx context.Context, cache, storePath string) ([]string, error) {
++	u, err := url.Parse(cache)
++	if err != nil {
++		return nil, err
++	}
++	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
++		return nil, fmt.Errorf("cannot read a narinfo from %s caches", u.Scheme)
++	}
++	hashPart, _, _ := strings.Cut(path.Base(storePath), "-")
++	// Query parameters configure Nix's store, they are not sent to the cache.
++	u.Path = strings.TrimSuffix(u.Path, "/") + "/" + hashPart + ".narinfo"
++	u.RawPath, u.RawQuery, u.Fragment = "", "", ""
++	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
++	if err != nil {
++		return nil, err
++	}
++	resp, err := narinfoClient.Do(req)
++	if err != nil {
++		return nil, err
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		return nil, fmt.Errorf("narinfo: HTTP %d", resp.StatusCode)
++	}
++	body, err := io.ReadAll(io.LimitReader(resp.Body, maxNarinfoSize+1))
++	if err != nil {
++		return nil, err
++	}
++	if len(body) > maxNarinfoSize {
++		return nil, errors.New("narinfo too large")
++	}
++
++	var signers []string
++	matched := false
++	for line := range strings.Lines(string(body)) {
++		key, value, ok := strings.Cut(strings.TrimRight(line, "\r\n"), ": ")
++		switch {
++		case !ok:
++		case key == "StorePath":
++			matched = value == storePath
++		case key == "Sig":
++			// The name is the cache's own text: show it only if it looks
++			// like a key name.
++			name, _, _ := strings.Cut(value, ":")
++			if !keyName.MatchString(name) {
++				return nil, errors.New("narinfo has a malformed signature")
++			}
++			if len(signers) < maxSigners && !slices.Contains(signers, name) {
++				signers = append(signers, name)
++			}
++		}
++	}
++	if !matched {
++		return nil, errors.New("narinfo is for another path")
++	}
++	return signers, nil
++}
+diff --git a/internal/niximage/refusal_test.go b/internal/niximage/refusal_test.go
+new file mode 100644
+index 00000000..91c63d2e
+--- /dev/null
++++ b/internal/niximage/refusal_test.go
+@@ -0,0 +1,212 @@
++// Copyright 2026 The Agent Substrate Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package niximage
++
++import (
++	"fmt"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++// The stderr below is what nix-store --realise printed against a Nix 2.35.6
++// daemon with require-sigs set, for each way the daemon refuses a path.
++
++const envHash = "0c0zb1l7mqvdrsgjq7b9vl0g9cyfh3q1"
++
++func missingStderr(extra string) string {
++	return extra + "don't know how to build these paths:\n" +
++		"  " + envPath + "\n" +
++		"error: path '" + envPath + "' is required, but there is no substituter that can build it\n"
++}
++
++func refusedStderr(caches ...string) string {
++	s := "this path will be fetched (0.1 KiB download, 0.1 KiB unpacked):\n  " + envPath + "\n"
++	for _, c := range caches {
++		s += "warning: ignoring substitute for '" + envPath + "' from '" + c + "', as it's not signed by any of the keys in 'trusted-public-keys'\n"
++	}
++	return s + "error: path '" + envPath + "' is required, but there is no substituter that can build it\n"
++}
++
++func narinfo(storePath string, sigs ...string) string {
++	s := "StorePath: " + storePath + "\nURL: nar/x.nar.xz\nCompression: xz\nNarSize: 136\nReferences: \n"
++	for _, sig := range sigs {
++		s += "Sig: " + sig + ":Z55j+WBReafjPltdpMZqD9L29Ax7u+uEUpXMAs5ZjbOEL9bPzyPVuGmkhewwwx2XxtNi11RNUTpOZiooQAp8Bg==\n"
++	}
++	return s
++}
++
++// binaryCache serves narinfo files by name, like an HTTP binary cache.
++func binaryCache(t *testing.T, files map[string]string) string {
++	t.Helper()
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		body, ok := files[strings.TrimPrefix(r.URL.Path, "/")]
++		if !ok {
++			http.NotFound(w, r)
++			return
++		}
++		_, _ = io.WriteString(w, body)
++	}))
++	t.Cleanup(srv.Close)
++	return srv.URL
++}
++
++// realiseError builds a view whose realise fails with stderr and returns
++// the error, plus the message nix-store's own error carries.
++func realiseError(t *testing.T, stderr string) (got, nixErr string) {
++	t.Helper()
++	node, viewDir := newFakeNode(t)
++	node.realiseStderr = stderr
++	s := newStore(t, node, viewDir)
++	_, _, err := s.EnsureImage(t.Context(), envPath)
++	if err == nil {
++		t.Fatal("EnsureImage succeeded, want a realise error")
++	}
++	gcRoot := filepath.Join(viewDir, gcRootsDirName, envBase)
++	return err.Error(), fmt.Sprintf("nix-store --realise %s --add-root %s: exit status 1: %s", envPath, gcRoot, redactURLs(strings.TrimSpace(stderr)))
++}
++
++func TestRealiseFailureSaysWhy(t *testing.T) {
++	unsigned := binaryCache(t, map[string]string{envHash + ".narinfo": narinfo(envPath)})
++	rogue := binaryCache(t, map[string]string{envHash + ".narinfo": narinfo(envPath, "ate-rogue-1", "other-2", "ate-rogue-1")})
++	const unreachable = "warning: unable to download 'http://cache.invalid/nix-cache-info': Could not resolve hostname (6) Could not resolve host: cache.invalid\n"
++	tests := []struct {
++		name, stderr, want string
++	}{
++		{
++			"no cache has the path",
++			missingStderr(""),
++			"no binary cache configured on this node has " + envPath,
++		},
++		{
++			"no reachable cache has the path",
++			missingStderr(unreachable),
++			"no binary cache this node could reach has " + envPath,
++		},
++		{
++			"a cache has it unsigned",
++			refusedStderr(unsigned),
++			"binary cache " + unsigned + " has " + envPath + ", but it carries no signature (the node takes only paths signed by a key in its trusted-public-keys)",
++		},
++		{
++			"a cache has it signed by keys the node does not trust",
++			refusedStderr(rogue),
++			"binary cache " + rogue + " has " + envPath + ", signed only by keys this node does not trust: ate-rogue-1, other-2 (the node takes only paths signed by a key in its trusted-public-keys)",
++		},
++		{
++			"two caches, two reasons",
++			refusedStderr(unsigned, rogue),
++			"binary cache " + unsigned + " has " + envPath + ", but it carries no signature; binary cache " + rogue + " has " + envPath + ", signed only by keys this node does not trust: ate-rogue-1, other-2 (",
++		},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			got, nixErr := realiseError(t, tc.stderr)
++			if !strings.HasPrefix(got, fmt.Sprintf("while realising %q: %s", envPath, tc.want)) {
++				t.Errorf("error = %q\nwant it to start with the reason %q", got, tc.want)
++			}
++			// Nix's own report still follows the reason.
++			if !strings.HasSuffix(got, "; "+nixErr) {
++				t.Errorf("error = %q\nwant it to end with nix-store's error %q", got, nixErr)
++			}
++		})
++	}
++
++	got, _ := realiseError(t, missingStderr(""))
++	for _, word := range []string{"sign", "trust"} {
++		if strings.Contains(got, word) {
++			t.Errorf("a missing path's error mentions %q: %q", word, got)
++		}
++	}
++}
++
++func TestRealiseFailureFallsBackToNixError(t *testing.T) {
++	gone := binaryCache(t, nil)
++	tests := []struct {
++		name   string
++		stderr func(t *testing.T) string
++	}{
++		{"not a substitution failure", func(*testing.T) string {
++			return "error: cannot connect to socket at '/nix/var/nix/daemon-socket/socket': Connection refused\n"
++		}},
++		{"the cache no longer has the narinfo", func(*testing.T) string { return refusedStderr(gone) }},
++		{"the narinfo is for another path", func(t *testing.T) string {
++			return refusedStderr(binaryCache(t, map[string]string{envHash + ".narinfo": narinfo(LogicalStoreDir+"/"+otherBase, "k-1")}))
++		}},
++		{"a signature with a malformed key name", func(t *testing.T) string {
++			return refusedStderr(binaryCache(t, map[string]string{envHash + ".narinfo": narinfo(envPath, "evil key\x1b[31m")}))
++		}},
++		{"a cache that is not http", func(*testing.T) string { return refusedStderr("file:///cache") }},
++		{"a narinfo larger than the cap", func(t *testing.T) string {
++			big := narinfo(envPath) + strings.Repeat("X-Padding: y\n", maxNarinfoSize/13+1)
++			return refusedStderr(binaryCache(t, map[string]string{envHash + ".narinfo": big}))
++		}},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			got, nixErr := realiseError(t, tc.stderr(t))
++			if want := fmt.Sprintf("while realising %q: %s", envPath, nixErr); got != want {
++				t.Errorf("error = %q\nwant nix-store's own error %q", got, want)
++			}
++		})
++	}
++}
++
++func TestRealiseFailureRedactsCredentials(t *testing.T) {
++	rogue := binaryCache(t, map[string]string{envHash + ".narinfo": narinfo(envPath, "ate-rogue-1")})
++	withSecrets := strings.Replace(rogue, "http://", "http://probe:s3cret@", 1) + "/?token=abc"
++	tests := []struct {
++		name, stderr, want string
++	}{
++		{"diagnosed", refusedStderr(withSecrets), "signed only by keys this node does not trust: ate-rogue-1"},
++		{"fallback", refusedStderr("http://probe:s3cret@cache.invalid/?token=abc"), "exit status 1: this path will be fetched"},
++		{"bare token userinfo", missingStderr("warning: unable to download 'https://t0k3n@cache.invalid/nix-cache-info?token=abc': HTTP error 401\n"), "no binary cache this node could reach has"},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			got, _ := realiseError(t, tc.stderr)
++			if !strings.Contains(got, tc.want) {
++				t.Errorf("error = %q, want it to contain %q", got, tc.want)
++			}
++			for _, secret := range []string{"s3cret", "t0k3n", "abc", "probe"} {
++				if strings.Contains(got, secret) {
++					t.Errorf("error leaks %q: %q", secret, got)
++				}
++			}
++			if !strings.Contains(got, "[redacted]@") {
++				t.Errorf("error = %q, want the cache's userinfo shown as redacted", got)
++			}
++		})
++	}
++}
++
++func TestRedactURL(t *testing.T) {
++	for in, want := range map[string]string{
++		"http://ate-nix-cache":                         "http://ate-nix-cache",
++		"https://u:p@cache.example.com:8443/sub/":      "https://[redacted]@cache.example.com:8443/sub/",
++		"s3://bucket?region=eu-west-1&secret-key=/k":   "s3://bucket?[redacted]",
++		"file:///cache":                                "file:///cache",
++		"https://tok@h/a@b":                            "https://[redacted]@h/a@b",
++		"http://[::1]:8080/x#frag":                     "http://[::1]:8080/x?[redacted]",
++		"https://cache.nixos.org/abc.narinfo?x=1#frag": "https://cache.nixos.org/abc.narinfo?[redacted]",
++	} {
++		if got := redactURL(in); got != want {
++			t.Errorf("redactURL(%q) = %q, want %q", in, got, want)
++		}
 +	}
 +}
 diff --git a/internal/nixref/nixref.go b/internal/nixref/nixref.go
