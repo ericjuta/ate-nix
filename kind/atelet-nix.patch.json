@@ -1,6 +1,6 @@
 [
   { "op": "add", "path": "/spec/template/spec/volumes/-",
-    "value": { "name": "nix", "hostPath": { "path": "/nix", "type": "Directory" } } },
+    "value": { "name": "nix", "hostPath": { "path": "/var/lib/ate-nix", "type": "Directory" } } },
   { "op": "add", "path": "/spec/template/spec/containers/0/volumeMounts/-",
     "value": { "name": "nix", "mountPath": "/nix" } },
   { "op": "add", "path": "/spec/template/spec/containers/0/args/-",

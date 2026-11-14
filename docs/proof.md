@@ -35,6 +35,20 @@ Also proven, without a cluster: the Go unit tests of the patch pass, and the Nix
 - The `aarch64-darwin` build.
 - The full `cmd/atelet` test suite under Nix. It needs mount privileges that the Nix build sandbox does not have, so the build runs only the tests of the changed packages.
 
+## Portable installer and node compatibility
+
+Proven on `x86_64-linux` on 2026-11-14:
+
+- The isolated portable-installer change passed all 14 root flake checks, including the full installer config, images, and steps test packages and real manifest rendering for Envoy and Agentgateway.
+- The built `ate-setup` loaded a relative install document from a fresh directory outside the checkout with `PATH=/nonexistent`, selected `existingCluster.enabled=true`, and reached the expected missing-kubeconfig error. No Docker, Go, ko, or GCP executable was available; the nonexistent kubeconfig prevented cluster requests.
+
+The compiled
+`internal/imagecache` regression binary ran `TestLegacyOverlayMount` as root
+inside a private mount namespace and passed. It invoked the legacy `mount(2)`
+path directly, including its filesystem behavior checks. This verifies the
+fallback implementation on the test host's kernel, not automatic fallback on
+an older kernel or a complete worker deployment.
+
 ## PTY streams
 
 - Proven: the Go tests of the patched env packages pass, the package builds, and the new flags are in `ate-env --help`.
