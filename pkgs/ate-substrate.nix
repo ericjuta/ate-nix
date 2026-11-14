@@ -23,6 +23,7 @@ let
       ../patches/substrate/0001-atelet-nix-image-source.patch
       ../patches/substrate/0002-existing-cluster-installer.patch
       ../patches/substrate/0003-overlayfs-legacy-fallback.patch
+      ../patches/substrate/0009-ate-setup-image-map.patch
     ];
   };
 in

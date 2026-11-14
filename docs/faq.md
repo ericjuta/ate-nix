@@ -18,8 +18,10 @@ Yes. A reference that does not start with `nix:` takes the upstream path, unchan
 **Why not build an OCI image with Nix?**
 You can, and upstream supports it today. You still push the image to a registry and each node still pulls and unpacks layers. With a Nix image, the node downloads only the packages that it lacks, and two images share each package that they have in common.
 
-**Why not nix-snapshotter?**
-[nix-snapshotter](https://github.com/pdtpartners/nix-snapshotter) makes containerd run ordinary Kubernetes pods from store paths. Substrate does not start actors through containerd: atelet prepares the actor's filesystem itself. This patch puts the store path support there. The two do different jobs: nix-snapshotter is for pods, this patch is for actors.
+**How do nix-snapshotter and nix-csi fit?**
+The optional [nix-snapshotter integration](nix-images.md#registry-free-substrate-system-pods) runs supported Substrate system and worker pods through containerd using signed Nix closures. Substrate actors do not start through containerd: atelet prepares their filesystem itself, using the independent `nix:/...` interface. Both are needed to remove conventional image publication from the supported deployment.
+
+nix-csi delivers closures as volumes or mounts but leaves container-image bootstrap and workload command/environment adaptation to the operator. Snapshotter preserves existing pod image configuration instead. Neither choice makes Kubernetes bootstrap disappear. Snapshotter avoids conventional registry images but still creates OCI metadata archives and small filesystem descriptors; see the linked guide for that boundary and the source-backed comparison.
 
 **Does the node build anything?**
 No. The node only downloads built, signed paths. If no trusted cache has a path, the actor does not start.

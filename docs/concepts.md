@@ -71,6 +71,15 @@ A **view** is the directory that atelet builds for one Nix image. It contains ha
 
 **PTY streams** are independent of Nix images. A PTY (pseudo-terminal) is what makes a remote shell behave like a local one: full-screen programs, colours, window resize. Upstream `ate-env` runs a command and returns its output. With the patch, it can also attach your terminal to the remote command. See [pty.md](pty.md).
 
+**Pod images** use a different path. Kubernetes starts Substrate's own services and
+workers through containerd; actors are started by atelet. The optional
+nix-snapshotter module lets containerd realize signed closures from a Nix cache
+using `nix:0...` archive references. These archives retain OCI image configuration
+and small directory/mountpoint layers, not conventional application image layers
+fetched from a registry. The installer image map keeps pod references separate
+from actors' `nix:/...` roots. See [nix-images.md](nix-images.md#registry-free-substrate-system-pods)
+for publication, bootstrap requirements, and supported deployments.
+
 ## How the repository is built
 
 A **patch stack** is a list of patch files that are applied, in order, to a pinned upstream commit.

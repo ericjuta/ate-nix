@@ -49,6 +49,16 @@ path directly, including its filesystem behavior checks. This verifies the
 fallback implementation on the test host's kernel, not automatic fallback on
 an older kernel or a complete worker deployment.
 
+## Registry-free pod delivery
+
+Proven on `x86_64-linux` on 2026-11-14:
+
+- The registry-free PR's root flake checks passed, including the complete bundle, built image-reference validation, package tests, and node configuration checks.
+- The Envoy dynamic module passed all 27 Rust tests and loaded successfully into the packaged Envoy for real listener and HTTP-filter configuration validation.
+- The permanent `registry-free-node` VM check passed with a separate node store. The probe archive and file-backed dependency were absent before pulling; the signed cache served their closure, with a recorded archive `.narinfo` request. A real containerd CRI sandbox and container started using the Nix snapshotter. The container ran as UID 10001, resolved supplementary group 10002, read its file-backed store mount, and exited 0. An unsigned archive was refused and remained absent; snapshotter GC roots existed.
+
+This is a signed-substitution/containerd runtime proof, not a complete fresh Substrate/Kubernetes installation. Kubernetes bootstrap, every bundled service's runtime behavior, ARM runtime, and production operation have not been qualified here. Snapshotter avoids conventional registry image publication but retains OCI metadata archives and small filesystem descriptors internally.
+
 ## PTY streams
 
 - Proven: the Go tests of the patched env packages pass, the package builds, and the new flags are in `ate-env --help`.
