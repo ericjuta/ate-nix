@@ -24,7 +24,7 @@ jobs:
             runner: ubuntu-24.04
           - system: aarch64-linux
             runner: ubuntu-24.04-arm
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -43,8 +43,10 @@ jobs:
       # Builds every check for this system: applies each patch to its pinned
       # upstream source, compiles, runs the Go tests that the packages enable,
       # builds the images, lints the kind scripts and evaluates the NixOS module.
+      # One derivation at a time: the Jaeger and Envoy builds together exceed
+      # the runner's memory.
       - name: Check the flake
-        run: nix flake check -L
+        run: nix flake check -L --max-jobs 1
       - name: Check the reference project
         working-directory: examples/reference
         run: nix flake check -L
