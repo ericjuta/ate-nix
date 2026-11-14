@@ -39,6 +39,16 @@ jobs:
             /usr/local/share/powershell /usr/local/share/chromium
           sudo docker image prune --all --force >/dev/null
           df -h /
+      # Compiling otelcol-contrib and Jaeger needs more memory than the
+      # runner has; the freed disk pays for swap.
+      - name: Add swap
+        run: |
+          sudo fallocate -l 24G /ci-swap
+          sudo chmod 600 /ci-swap
+          sudo mkswap /ci-swap >/dev/null
+          sudo swapon /ci-swap
+          free -g
+          nproc
       - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
       # Builds every check for this system: applies each patch to its pinned
       # upstream source, compiles, runs the Go tests that the packages enable,
