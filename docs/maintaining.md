@@ -49,6 +49,7 @@ No upstream code is stored here. Each `pkgs/*.nix` file names an upstream commit
 | `patches/nix-snapshotter/nix-snapshotter-builder-error-output.patch` | nix-snapshotter v0.4.0 | Bounded substitution diagnostics returned to CRI callers. |
 | `patches/env/0001-pty-process-streams.patch` | env `56424de` | PTY streams. Samuel Huber's patch, rebased. [pty.md](pty.md) lists the one part that was dropped. |
 | `patches/env/0002-substrate-v1.0.0.patch` | env `56424de` | `go.mod` and `go.sum` only: Substrate v1.0.0. |
+| `patches/env/0003-free-slot-before-exit.patch` | env `56424de` | The guest frees a process slot before it reports the exit. Without it, upstream `TestConcurrencyLimiter` fails on a loaded machine. |
 
 ## Update a pin
 
