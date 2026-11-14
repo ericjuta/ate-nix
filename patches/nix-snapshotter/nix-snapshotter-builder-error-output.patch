@@ -1,0 +1,80 @@
+nix-snapshotter: return nix-store's output with a failed realisation.
+
+A pull of a `nix:0` reference whose closure cannot be substituted (unsigned, missing from the
+binary cache, cache unreachable) failed with only "exit status 1"; the reason was in the
+containerd log. The error now carries the end of Nix's output (bounded, valid UTF-8), so the pod
+event says why.
+
+Applies to standalone upstream nix-snapshotter v0.4.0.
+
+--- a/pkg/nix/nix.go
++++ b/pkg/nix/nix.go
+@@ -2,6 +2,7 @@
+ 
+ import (
+ 	"context"
++	"fmt"
+ 	"os/exec"
+ 	"strings"
+ 
+@@ -69,10 +70,23 @@
+ 		log.G(ctx).
+ 			WithField("nixStorePath", nixStorePath).
+ 			Errorf("Failed to create gc root: %s\n%s", err, string(out))
++		return outputError("nix-store --realise "+nixStorePath, err, out)
+ 	}
+-	return err
++	return nil
+ }
+ 
++// outputError keeps the end of a builder's output, where Nix prints why a path could not be
++// realised, so the CRI caller (and the pod event) carry the reason, not only the exit status.
++func outputError(command string, err error, out []byte) error {
++	const tailBytesMax = 768
++	text := strings.ToValidUTF8(strings.TrimSpace(string(out)), "")
++	if len(text) > tailBytesMax {
++		// gRPC status messages must be valid UTF-8; the cut may split a rune.
++		text = "..." + strings.ToValidUTF8(text[len(text)-tailBytesMax:], "")
++	}
++	return fmt.Errorf("%s: %w: %s", command, err, text)
++}
++
+ // NewExternalBuilder returns a NixBuilder from an external executable with
+ // two arguments: an out-link path, and a Nix store path.
+ func NewExternalBuilder(name string) NixBuilder {
+@@ -82,7 +96,8 @@
+ 			log.G(ctx).
+ 				WithField("nixStorePath", nixStorePath).
+ 				Errorf("Failed to run external nix builder: %s\n%s", err, string(out))
++			return outputError(name+" "+nixStorePath, err, out)
+ 		}
+-		return err
++		return nil
+ 	}
+ }
+diff --git a/pkg/nix/output_error_test.go b/pkg/nix/output_error_test.go
+new file mode 100644
+--- /dev/null
++++ b/pkg/nix/output_error_test.go
+@@ -0,0 +1,21 @@
++package nix
++
++import (
++    "errors"
++    "strings"
++    "testing"
++    "unicode/utf8"
++)
++
++func TestOutputError(t *testing.T) {
++    cause := errors.New("exit status 1")
++    for _, out := range []string{"not signed by a trusted key", "bad\xfftext", strings.Repeat("界", 400) + " final reason"} {
++        err := outputError("nix-store --realise /nix/store/probe", cause, []byte(out))
++        if !errors.Is(err, cause) { t.Fatalf("lost cause: %v", err) }
++        if !utf8.ValidString(err.Error()) { t.Fatalf("invalid UTF-8: %q", err) }
++        if len(err.Error()) > 900 { t.Fatalf("unbounded diagnostic: %d", len(err.Error())) }
++        if strings.HasSuffix(out, "final reason") && !strings.HasSuffix(err.Error(), "final reason") {
++            t.Fatalf("lost Nix's failure reason: %v", err)
++        }
++    }
++}

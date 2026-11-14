@@ -59,6 +59,26 @@ APIs, Linux node capabilities, persistent storage, and snapshot storage.
 See [docs/operating.md](docs/operating.md) for the complete publishing and
 installation procedure, including the older-kernel worker compatibility path.
 
+### Run Substrate pods without a container registry
+
+The Linux `substrate-nix-bundle` output supplies closure-backed system pods,
+worker pods, demo actor roots, and an installer image map. The optional
+NixOS snapshotter module connects standalone containerd and kubelet to
+pinned upstream nix-snapshotter:
+
+```sh
+nix build .#substrate-nix-bundle .#substrate-image-map-check
+```
+
+Publish the signed bundle to your Nix binary cache and install with
+`ate-setup --image-map`; see [docs/nix-images.md](docs/nix-images.md#registry-free-substrate-system-pods)
+for the complete node and installer configuration, supported profiles,
+and the nix-csi comparison. Actors keep their independent `nix:/...` interface;
+Kubernetes pods use snapshotter `nix:0...` references. No conventional OCI
+application images need to be built, pushed, or pulled. Snapshotter still
+uses OCI configuration archives and small filesystem descriptors internally,
+and Kubernetes/bootstrap assets must be provisioned separately.
+
 ## Documentation
 
 New here? Start with [docs/README.md](docs/README.md).

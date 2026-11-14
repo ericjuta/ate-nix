@@ -1,0 +1,985 @@
+Generic image maps for Agent Substrate v1.0.0 (b34fbee742906494b5eb4f1f36987176bf8770a4).
+
+Install exact prebuilt references without ko or registry resolution. Keep ordinary
+registry installs unchanged. Snapshotter pod archives use nix:0; the independent
+atelet image source continues to use nix:/ root trees for actors. Retains the
+original Apache-2.0 notices of the extracted installer implementation.
+
+diff --git a/cmd/ate-setup/commands.md b/cmd/ate-setup/commands.md
+index 0b91ed13..c4b7872b 100644
+--- a/cmd/ate-setup/commands.md
++++ b/cmd/ate-setup/commands.md
+@@ -39,6 +39,7 @@ every setting with its environment variable.
+ | `--version` / `-v` | Print the version |
+ | `--image-repo REPO` | Install pre-built images from `REPO` instead of building them with `ko` |
+ | `--image-tag TAG` | The tag those images carry. Each of the two requires the other |
++| `--image-map FILE` | Install the images `FILE` names, as written; excludes `--image-repo` and `--image-tag`. `ATE_IMAGE_MAP` when the flag is absent |
+ 
+ Both have an environment equivalent, read when the flag is absent:
+ `ATE_IMAGE_REPO` and `ATE_IMAGE_TAG`.
+@@ -101,6 +102,26 @@ not depend on, so those registries need a `docker login` first.
+ `TAG` may itself carry a digest, as in `--image-tag v0.0.0@sha256:...`. A tag
+ that already names a manifest is used as written, and is not looked up.
+ 
++### Image maps
++
++`--image-map FILE` (or `ATE_IMAGE_MAP`) takes an absolute path to a file with
++one `<image> <reference>` line per image; blank lines and `#` comments are
++ignored. The image is a component's image name (`atelet`, `ateapi`, ...) or
++`envoy-dataplane`; the reference is a `nix:0/nix/store/<hash>-<name>.tar` store
++reference or a reference pinned by digest. Each reference replaces the
++component's `ko://` reference as written: nothing is looked up, and a `nix:0`
++reference is resolved by nix-snapshotter for Kubernetes pods and workers.
++Demo actor images instead use `nix:/nix/store/<hash>-<name>` root trees.
++The installer rejects a Nix reference with the wrong runtime for a component. A component the manifests use but the map lacks fails the install.
++
++The image may instead be an exact reference pinned by digest that a manifest
++names, such as the bundled PostgreSQL's
++`postgres:18-alpine@sha256:<digest> nix:0/nix/store/<hash>-nix-image-postgres.tar`.
++Every occurrence of that reference as a whole token, in the system manifests
++and the PostgreSQL manifest, is replaced; a differently written reference to
++the same image (`docker.io/library/postgres:...`) is not. A reference the map
++does not name is installed as the manifest pins it.
++
+ ## Deploy
+ 
+ - `deploy ate-system`
+diff --git a/cmd/ate-setup/internal/config/config_test.go b/cmd/ate-setup/internal/config/config_test.go
+index 18e95e41..f382f89f 100644
+--- a/cmd/ate-setup/internal/config/config_test.go
++++ b/cmd/ate-setup/internal/config/config_test.go
+@@ -1443,6 +1443,46 @@ func TestSourceShellEnvReportsFailure(t *testing.T) {
+ 	}
+ }
+ 
++func TestImageMapSource(t *testing.T) {
++	dir := t.TempDir()
++	mapFile := filepath.Join(dir, "images")
++	ref := "nix:0/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nix-image-atelet.tar"
++	if err := os.WriteFile(mapFile, []byte("atelet "+ref+"\n"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	bad := filepath.Join(dir, "bad")
++	if err := os.WriteFile(bad, []byte("atelet ghcr.io/x/atelet:v1\n"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	t.Run("loaded", func(t *testing.T) {
++		loadEnv(t)
++		cfg, err := Load(Options{ImageMap: mapFile})
++		if err != nil {
++			t.Fatalf("Load() error = %v", err)
++		}
++		if !cfg.Images.IsPrebuilt() || cfg.Images.Map.Images["atelet"] != ref || cfg.Images.MapFile != mapFile {
++			t.Errorf("Images = %+v, want the map loaded", cfg.Images)
++		}
++	})
++	for name, tc := range map[string]struct {
++		opts Options
++		want string
++	}{
++		"with a repo":   {Options{ImageMap: mapFile, ImageRepo: "example.com/x", ImageTag: "v1"}, "an image map names every image itself"},
++		"with a tag":    {Options{ImageMap: mapFile, ImageTag: "v1"}, "an image map names every image itself"},
++		"relative path": {Options{ImageMap: "images"}, "an absolute path"},
++		"missing file":  {Options{ImageMap: filepath.Join(dir, "gone")}, "reading image map"},
++		"unpinned ref":  {Options{ImageMap: bad}, "not pinned by digest"},
++	} {
++		t.Run(name, func(t *testing.T) {
++			loadEnv(t)
++			if _, err := Load(tc.opts); err == nil || !strings.Contains(err.Error(), tc.want) {
++				t.Errorf("Load() error = %v, want one containing %q", err, tc.want)
++			}
++		})
++	}
++}
++
+ func TestLoadImageSource(t *testing.T) {
+ 	tests := []struct {
+ 		name      string
+diff --git a/cmd/ate-setup/internal/config/coverage_test.go b/cmd/ate-setup/internal/config/coverage_test.go
+index cbbfa732..1a65076c 100644
+--- a/cmd/ate-setup/internal/config/coverage_test.go
++++ b/cmd/ate-setup/internal/config/coverage_test.go
+@@ -25,7 +25,7 @@ import (
+ // supplied rather than holding a value of their own.
+ var notFromASetting = map[string]bool{
+ 	"Root":                     true,
+-	"Images":                   true, // assembled from images.repo and images.tag
++	"Images":                   true, // assembled from images.repo, images.tag and images.map
+ 	"CloudSQL":                 true, // assembled from the ateapi.postgres.cloudsql.* settings
+ 	"PostgresOwnerRoleSet":     true,
+ 	"PostgresReadWriteRoleSet": true,
+@@ -88,6 +88,10 @@ func valueFor(key string) string {
+ 	switch key {
+ 	case "atenet.dataplane":
+ 		return RouterEnvoy
++	case "images.map":
++		// Excludes images.repo and images.tag, which this fixture sets;
++		// TestImageMapSource covers it.
++		return ""
+ 	case "clusterSize":
+ 		return ClusterSizeSize0
+ 	case "ingressAllowedSPIFFEIDs", "ateapi.authz.egressGatewayExtraSPIFFEIDs":
+diff --git a/cmd/ate-setup/internal/config/load.go b/cmd/ate-setup/internal/config/load.go
+index c9410fab..ec2af1b6 100644
+--- a/cmd/ate-setup/internal/config/load.go
++++ b/cmd/ate-setup/internal/config/load.go
+@@ -235,8 +235,9 @@ func buildConfig(root string, env map[string]string, r *Resolved) (*Config, erro
+ 		ActorJWTIssuer:     actorJWTIssuer,
+ 		DockerBuildFlags:   strings.Fields(r.String("docker.buildFlags")),
+ 		Images: images.Source{
+-			Repo: strings.TrimSuffix(r.String("images.repo"), "/"),
+-			Tag:  r.String("images.tag"),
++			Repo:    strings.TrimSuffix(r.String("images.repo"), "/"),
++			Tag:     r.String("images.tag"),
++			MapFile: r.String("images.map"),
+ 		},
+ 		Router:               r.String("atenet.dataplane"),
+ 		PostgresSchema:       r.String("ateapi.postgres.schema"),
+@@ -379,6 +380,22 @@ func validateResolved(cfg *Config, r *Resolved) error {
+ 	// source that looks like the release the tag names.
+ 	repo, _ := r.Value("images.repo")
+ 	tag, _ := r.Value("images.tag")
++	if imageMap, _ := r.Value("images.map"); cfg.Images.MapFile != "" {
++		switch {
++		case cfg.Images.Repo != "":
++			return &ConflictError{A: imageMap, B: repo, Why: "an image map names every image itself"}
++		case cfg.Images.Tag != "":
++			return &ConflictError{A: imageMap, B: tag, Why: "an image map names every image itself"}
++		case !filepath.IsAbs(cfg.Images.MapFile):
++			return &InvalidError{Value: imageMap, Want: "an absolute path"}
++		}
++		m, err := images.ReadImageMap(cfg.Images.MapFile)
++		if err != nil {
++			return err
++		}
++		cfg.Images.Map = m
++		return validateResolvedAfterImages(cfg, r)
++	}
+ 	switch {
+ 	case cfg.Images.IsPrebuilt() && cfg.Images.Tag == "":
+ 		return &ConflictError{A: repo, B: tag, Why: "a prebuilt image repository needs a tag"}
+@@ -386,6 +403,11 @@ func validateResolved(cfg *Config, r *Resolved) error {
+ 		return &ConflictError{A: tag, B: repo,
+ 			Why: "without a repository, images are built from source and the tag names nothing"}
+ 	}
++	return validateResolvedAfterImages(cfg, r)
++}
++
++// validateResolvedAfterImages is validateResolved past the image source.
++func validateResolvedAfterImages(cfg *Config, r *Resolved) error {
+ 
+ 	dataplane, _ := r.Value("atenet.dataplane")
+ 	switch cfg.Router {
+diff --git a/cmd/ate-setup/internal/config/options_test.go b/cmd/ate-setup/internal/config/options_test.go
+index a6d03c51..86d9b1c4 100644
+--- a/cmd/ate-setup/internal/config/options_test.go
++++ b/cmd/ate-setup/internal/config/options_test.go
+@@ -48,6 +48,7 @@ type Options struct {
+ 	// Image source selection.
+ 	ImageRepo string
+ 	ImageTag  string
++	ImageMap  string
+ 
+ 	// NoDevEnv skips sourcing .ate-dev-env.sh even when it exists.
+ 	NoDevEnv bool
+@@ -94,6 +95,7 @@ func optionsFlagSet(opts Options) (*pflag.FlagSet, error) {
+ 		{"otlp-endpoint", opts.OtlpEndpoint},
+ 		{"image-repo", opts.ImageRepo},
+ 		{"image-tag", opts.ImageTag},
++		{"image-map", opts.ImageMap},
+ 	} {
+ 		if err := set(kv.flag, kv.val); err != nil {
+ 			return nil, err
+diff --git a/cmd/ate-setup/internal/config/setting.go b/cmd/ate-setup/internal/config/setting.go
+index cb3dfd15..c744cb37 100644
+--- a/cmd/ate-setup/internal/config/setting.go
++++ b/cmd/ate-setup/internal/config/setting.go
+@@ -144,6 +144,14 @@ var Registry = []Setting{
+ 		Key: "images.tag", Env: "ATE_IMAGE_TAG", Flag: "image-tag", Kind: KindString,
+ 		Usage: "Tag the pre-built images carry (required with --image-repo)",
+ 	},
++	{
++		// Nix-built installs name every image exactly.
++		Key: "images.map", Env: "ATE_IMAGE_MAP", Flag: "image-map", Kind: KindString,
++		Usage: "Install pre-built images named by this file, an absolute path holding one " +
++			"\"<image> <reference>\" line per image, where the image is a component's image name " +
++			"or an exact digest-pinned reference the manifests name. References are nix:0 store " +
++			"references or digest-pinned and installed as written (excludes --image-repo and --image-tag)",
++	},
+ 
+ 	{
+ 		Key: "storage.bucketName", Env: "BUCKET_NAME", Flag: "storage-bucket-name", Kind: KindString,
+diff --git a/cmd/ate-setup/internal/images/imagemap.go b/cmd/ate-setup/internal/images/imagemap.go
+new file mode 100644
+index 00000000..4fcc0260
+--- /dev/null
++++ b/cmd/ate-setup/internal/images/imagemap.go
+@@ -0,0 +1,203 @@
++// Copyright 2026 Google LLC
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package images
++
++// A deployment that builds its images with Nix already knows each component's exact
++// reference, so the installer takes them as written instead of resolving
++// REPO/name:TAG against a registry. Each reference is installed verbatim:
++// nix:0 archives are resolved by nix-snapshotter for pods and workers;
++// nix:/ root trees are resolved by atelet for actors, never by this tool.
++//
++// The same deployment builds the third-party images the manifests pin by
++// digest (PostgreSQL, RustFS, the observability stack), so a map also
++// replaces an exact upstream reference with its own build.
++
++import (
++	"bufio"
++	"bytes"
++	"fmt"
++	"os"
++	"regexp"
++	"slices"
++	"strings"
++
++	"github.com/distribution/reference"
++
++	"go.ate.dev/substrate/internal/nixref"
++)
++
++const (
++	// imageMapLinesMax bounds an image map: one line per component, with
++	// room for comments.
++	imageMapLinesMax = 1024
++	// imageMapLineMax bounds one line: a name and a reference of at most
++	// 512 bytes (the API's image reference bound).
++	imageMapLineMax = 1024
++)
++
++// ExtraImages are the images the manifests reach other than by ko://
++// reference, which an image map may name too: envoy-dataplane is built from
++// a Dockerfile.
++var ExtraImages = []string{"envoy-dataplane"}
++
++// mappable reports whether name is an image an install can use.
++func mappable(name string) bool {
++	if slices.Contains(ExtraImages, name) {
++		return true
++	}
++	return slices.ContainsFunc(Components, func(pkg string) bool { return ImageName(pkg) == name })
++}
++
++// ImageMap is the content of an image map file (see ReadImageMap).
++type ImageMap struct {
++	// Images maps an image name (see ImageName and ExtraImages) to the
++	// reference that replaces the image's ko:// reference.
++	Images map[string]string
++	// References maps an exact reference the manifests name, such as
++	// postgres:18-alpine@sha256:..., to the reference installed in its place.
++	References map[string]string
++}
++
++// ReadImageMap reads an image map file: one "<image> <reference>" pair per
++// line. The image is either a component's image name (see ImageName) or one of
++// ExtraImages, or an exact image reference pinned by digest that a manifest
++// names other than by ko:// reference. The reference is a nix:0 store
++// archive, an actor nix:/ root, or an OCI digest. Blank lines and lines
++// starting with '#' are ignored. An image may appear once.
++func ReadImageMap(path string) (*ImageMap, error) {
++	b, err := os.ReadFile(path)
++	if err != nil {
++		return nil, fmt.Errorf("reading image map: %w", err)
++	}
++	m, err := ParseImageMap(b)
++	if err != nil {
++		return nil, fmt.Errorf("image map %s: %w", path, err)
++	}
++	return m, nil
++}
++
++// ParseImageMap parses the content of an image map (see ReadImageMap).
++func ParseImageMap(content []byte) (*ImageMap, error) {
++	m := &ImageMap{Images: map[string]string{}, References: map[string]string{}}
++	sc := bufio.NewScanner(bytes.NewReader(content))
++	sc.Buffer(make([]byte, 0, imageMapLineMax), imageMapLineMax)
++	for n := 1; sc.Scan(); n++ {
++		if n > imageMapLinesMax {
++			return nil, fmt.Errorf("more than %d lines", imageMapLinesMax)
++		}
++		line := strings.TrimSpace(sc.Text())
++		if line == "" || strings.HasPrefix(line, "#") {
++			continue
++		}
++		fields := strings.Fields(line)
++		if len(fields) != 2 {
++			return nil, fmt.Errorf("line %d: want \"<image> <reference>\", got %q", n, line)
++		}
++		image, ref := fields[0], fields[1]
++		// An image name is a bare word; anything with a reference's
++		// separators is meant as a reference.
++		target := m.Images
++		if strings.ContainsAny(image, "/:@") {
++			if err := validateReplacedRef(image); err != nil {
++				return nil, fmt.Errorf("line %d: %w", n, err)
++			}
++			target = m.References
++		} else if !mappable(image) {
++			return nil, fmt.Errorf("line %d: %q is not an image the install uses", n, image)
++		}
++		if _, dup := target[image]; dup {
++			return nil, fmt.Errorf("line %d: %s is mapped twice", n, image)
++		}
++		if err := validateMappedRef(ref); err != nil {
++			return nil, fmt.Errorf("line %d: %s: %w", n, image, err)
++		}
++		// Workers are Kubernetes containers. Only demo actor roots use nix:/.
++		actor := slices.ContainsFunc(Components, func(pkg string) bool { return ImageName(pkg) == image && strings.HasPrefix(pkg, "demos/") })
++		if (actor && strings.HasPrefix(ref, "nix:0")) || (!actor && strings.HasPrefix(ref, "nix:/")) {
++			return nil, fmt.Errorf("line %d: %s: reference uses the wrong runtime (actors need nix:/ roots, pods need nix:0 archives)", n, image)
++		}
++		target[image] = ref
++	}
++	if err := sc.Err(); err != nil {
++		return nil, err
++	}
++	if len(m.Images) == 0 && len(m.References) == 0 {
++		return nil, fmt.Errorf("maps no image")
++	}
++	return m, nil
++}
++
++// validateReplacedRef accepts a reference a map may replace: one pinned by
++// digest. A tag alone names whatever was pushed under it last, so the image a
++// map entry stands in for would be unknown.
++func validateReplacedRef(ref string) error {
++	parsed, err := reference.ParseNormalizedNamed(ref)
++	if err != nil {
++		return fmt.Errorf("%q is neither an image the install uses nor an image reference: %w", ref, err)
++	}
++	if _, ok := parsed.(reference.Digested); !ok {
++		return fmt.Errorf("%q is not pinned by digest, so it cannot be replaced", ref)
++	}
++	return nil
++}
++
++// referenceToken matches a maximal run of the characters an image reference
++// is made of (distribution/reference: name components, domain and port, tag,
++// digest algorithm and hex). A manifest reference is always delimited by
++// something else, typically YAML whitespace or quotes.
++var referenceToken = regexp.MustCompile(`[A-Za-z0-9._/:@+-]+`)
++
++// ReplaceReferences replaces every exact reference the map names
++// (References) with its replacement.
++//
++// Matching whole tokens, never substrings, is what makes the textual
++// replacement safe: docker.io/library/postgres:16@sha256:... is a different
++// token from postgres:16@sha256:..., so mapping the short form leaves the long
++// one, and any reference the short one is a prefix or suffix of, as written.
++func (m *ImageMap) ReplaceReferences(manifest []byte) []byte {
++	if len(m.References) == 0 {
++		return manifest
++	}
++	return referenceToken.ReplaceAllFunc(manifest, func(token []byte) []byte {
++		if ref, ok := m.References[string(token)]; ok {
++			return []byte(ref)
++		}
++		return token
++	})
++}
++
++// validateMappedRef accepts what an install can pin: a nix:0 store
++// reference, whose store path pins it, or a registry reference with a
++// digest.
++func validateMappedRef(ref string) error {
++	if rest, ok := strings.CutPrefix(ref, "nix:0"); ok {
++		if !strings.HasSuffix(rest, ".tar") {
++			return fmt.Errorf("nix snapshotter reference %q must name a .tar archive", ref)
++		}
++		_, _, err := nixref.Parse("nix:" + rest)
++		return err
++	}
++	if _, isNix, err := nixref.Parse(ref); isNix {
++		return err
++	}
++	parsed, err := reference.ParseNormalizedNamed(ref)
++	if err != nil {
++		return fmt.Errorf("%q is not an image reference: %w", ref, err)
++	}
++	if _, ok := parsed.(reference.Digested); !ok {
++		return fmt.Errorf("%q is not pinned by digest", ref)
++	}
++	return nil
++}
+diff --git a/cmd/ate-setup/internal/images/imagemap_test.go b/cmd/ate-setup/internal/images/imagemap_test.go
+new file mode 100644
+index 00000000..306583c3
+--- /dev/null
++++ b/cmd/ate-setup/internal/images/imagemap_test.go
+@@ -0,0 +1,287 @@
++// Copyright 2026 Google LLC
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package images_test
++
++import (
++	"context"
++	"os"
++	"path/filepath"
++	"regexp"
++	"slices"
++	"strings"
++	"testing"
++
++	"go.ate.dev/substrate/cmd/ate-setup/internal/config"
++	"go.ate.dev/substrate/cmd/ate-setup/internal/images"
++	"go.ate.dev/substrate/cmd/ate-setup/internal/kube"
++)
++
++// testNixRef is a nix:0 reference for name, its hash in Nix's base32
++// alphabet.
++func testNixRef(name string) string {
++	return "nix:0/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nix-image-" + name + ".tar"
++}
++
++// testImageMap maps pod archives and independent actor root trees.
++func testImageMap() string {
++	var b strings.Builder
++	b.WriteString("# generated from the Nix image set\n\n")
++	for _, pkg := range images.Components {
++		name := images.ImageName(pkg)
++		ref := testNixRef(name)
++		if strings.HasPrefix(pkg, "demos/") {
++			ref = "nix:/nix/store/0123456789abcdfghijklmnpqrsvwxyz-" + name
++		}
++		b.WriteString(name + " " + ref + "\n")
++	}
++	for _, name := range images.ExtraImages {
++		b.WriteString(name + "   " + testNixRef(name) + "\n")
++	}
++	return b.String()
++}
++
++func TestParseImageMap(t *testing.T) {
++	m, err := images.ParseImageMap([]byte(testImageMap()))
++	if err != nil {
++		t.Fatalf("ParseImageMap() = %v", err)
++	}
++	if got, want := len(m.Images), len(images.Components)+len(images.ExtraImages); got != want {
++		t.Errorf("mapped %d images, want %d", got, want)
++	}
++	if len(m.References) != 0 {
++		t.Errorf("mapped references %v from a map of image names", m.References)
++	}
++	if m.Images["atelet"] != testNixRef("atelet") {
++		t.Errorf("atelet = %q, want %q", m.Images["atelet"], testNixRef("atelet"))
++	}
++
++	pinned := "ghcr.io/x/atelet@sha256:" + strings.Repeat("1", 64)
++	upstream := "postgres:18-alpine@sha256:" + strings.Repeat("2", 64)
++	for name, content := range map[string]string{
++		"unknown image":                "atelet-sidecar " + testNixRef("x"),
++		"mapped twice":                 "atelet " + testNixRef("a") + "\natelet " + testNixRef("b"),
++		"actor given pod archive": "counter " + testNixRef("counter"),
++		"pod given actor root": "atelet nix:/nix/store/0123456789abcdfghijklmnpqrsvwxyz-atelet",
++		"tag only":                     "atelet ghcr.io/x/atelet:v1",
++		"malformed nix reference":      "atelet nix:0/nix/store/short-nix-image-atelet.tar",
++		"nix reference not an archive": "atelet nix:0/nix/store/0123456789abcdfghijklmnpqrsvwxyz-atelet",
++		"three fields":                 "atelet " + pinned + " extra",
++		"one field":                    "atelet",
++		"empty":                        "# nothing\n",
++		"reference mapped twice":       upstream + " " + testNixRef("a") + "\n" + upstream + " " + testNixRef("b"),
++		"replaced reference by tag":    "postgres:18-alpine " + testNixRef("postgres"),
++		"replaced reference malformed": "Postgres:18@sha256:" + strings.Repeat("2", 64) + " " + testNixRef("postgres"),
++		"replaced nix reference":       testNixRef("postgres") + " " + testNixRef("other"),
++		"replacement by tag":           upstream + " ghcr.io/x/postgres:18",
++	} {
++		t.Run(name, func(t *testing.T) {
++			if _, err := images.ParseImageMap([]byte(content)); err == nil {
++				t.Errorf("ParseImageMap(%q) accepted it", content)
++			}
++		})
++	}
++	if m, err := images.ParseImageMap([]byte("atelet " + pinned)); err != nil || m.Images["atelet"] != pinned {
++		t.Errorf("ParseImageMap(digest-pinned) = %v, %v", m, err)
++	}
++	// An exact reference may be the map's only entry.
++	m, err = images.ParseImageMap([]byte(upstream + " " + testNixRef("postgres") + "\n"))
++	if err != nil {
++		t.Fatalf("ParseImageMap(reference) = %v", err)
++	}
++	if len(m.Images) != 0 || len(m.References) != 1 || m.References[upstream] != testNixRef("postgres") {
++		t.Errorf("ParseImageMap(reference) = %+v, want only %s replaced", m, upstream)
++	}
++}
++
++// An exact reference is replaced wherever it stands as a whole reference, and
++// nowhere else.
++func TestImageMapReplacesExactReferences(t *testing.T) {
++	digest := "@sha256:" + strings.Repeat("3", 64)
++	upstream := "postgres:18-alpine" + digest
++	m, err := images.ParseImageMap([]byte(upstream + " " + testNixRef("postgres") + "\n"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	manifest := strings.Join([]string{
++		"containers:",
++		"- image: " + upstream,
++		`- image: "` + upstream + `"`,
++		"- {name: x, image: '" + upstream + "'}",
++		// Other references the mapped one is part of stay as written.
++		"- image: docker.io/library/" + upstream,
++		"- image: postgres:18-alpine",
++		"- image: my" + upstream,
++		"- image: " + upstream + "0",
++		"",
++	}, "\n")
++	want := strings.Join([]string{
++		"containers:",
++		"- image: " + testNixRef("postgres"),
++		`- image: "` + testNixRef("postgres") + `"`,
++		"- {name: x, image: '" + testNixRef("postgres") + "'}",
++		"- image: docker.io/library/" + upstream,
++		"- image: postgres:18-alpine",
++		"- image: my" + upstream,
++		"- image: " + upstream + "0",
++		"",
++	}, "\n")
++	if got := string(m.ReplaceReferences([]byte(manifest))); got != want {
++		t.Errorf("ReplaceReferences() =\n%s\nwant\n%s", got, want)
++	}
++	// Without references the manifest is returned as it was.
++	names, err := images.ParseImageMap([]byte(testImageMap()))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got := string(names.ReplaceReferences([]byte(manifest))); got != manifest {
++		t.Errorf("ReplaceReferences() without references changed the manifest:\n%s", got)
++	}
++}
++
++// pinnedImage matches a container image a manifest pins by digest, which the
++// source manifests do only for third-party images (components are ko://
++// references, nix:0 references carry no digest).
++var pinnedImage = regexp.MustCompile(`(?m)^\s*(?:-\s+)?image:\s*["']?([^\s"']+@sha256:[0-9a-f]{64})`)
++
++// Every third-party image the kind install deploys -- the bundled PostgreSQL,
++// RustFS and its bucket job, the observability stack -- resolves from a map
++// that names its exact references, through the same paths ate-setup applies
++// them by: the system manifests through the resolver, PostgreSQL through
++// ReplaceReferences.
++func TestThirdPartyImagesResolveFromAnImageMap(t *testing.T) {
++	root, err := config.RepoRoot()
++	if err != nil {
++		t.Fatalf("resolving repo root: %v", err)
++	}
++	installDir := filepath.Join(root, "manifests", "ate-install")
++	files := []string{
++		filepath.Join(installDir, "postgres", "postgres.yaml"),
++		filepath.Join(installDir, "kind", "rustfs.yaml"),
++		filepath.Join(installDir, "kind", "otel-collector.yaml"),
++		filepath.Join(installDir, "kind", "prometheus.yaml"),
++	}
++	manifests := map[string][]byte{}
++	var upstream []string
++	for _, file := range files {
++		manifest, err := kube.ReadPath(file)
++		if err != nil {
++			t.Fatal(err)
++		}
++		manifests[file] = manifest
++		for _, match := range pinnedImage.FindAllStringSubmatch(string(manifest), -1) {
++			if !slices.Contains(upstream, match[1]) {
++				upstream = append(upstream, match[1])
++			}
++		}
++	}
++	// postgres (both containers name one reference), rustfs, aws-cli,
++	// otel-collector-contrib, jaeger, prometheus.
++	if len(upstream) != 6 {
++		t.Fatalf("found third-party images %v, want 6", upstream)
++	}
++	content := testImageMap()
++	for i, ref := range upstream {
++		content += ref + " " + testNixRef("third-party-"+string(rune('a'+i))) + "\n"
++	}
++	m, err := images.ParseImageMap([]byte(content))
++	if err != nil {
++		t.Fatal(err)
++	}
++	resolver := images.NewPrebuilt(images.Source{MapFile: "/m", Map: m}, newStubRegistry().digest)
++	for _, file := range files {
++		t.Run(filepath.Base(file), func(t *testing.T) {
++			out, err := resolver.ResolveBytes(context.Background(), manifests[file])
++			if err != nil {
++				t.Fatalf("ResolveBytes() = %v", err)
++			}
++			if !slices.Equal(out, m.ReplaceReferences(manifests[file])) {
++				t.Error("the resolver and ReplaceReferences disagree")
++			}
++			if left := pinnedImage.FindAllStringSubmatch(string(out), -1); len(left) > 0 {
++				t.Errorf("third-party images survived: %v", left)
++			}
++			if !strings.Contains(string(out), "nix:0/nix/store/") {
++				t.Error("no nix:0 reference reached the manifest")
++			}
++			if _, err := kube.DecodeManifestBytes(out); err != nil {
++				t.Errorf("the resolved manifest no longer parses: %v", err)
++			}
++		})
++	}
++}
++
++// An image map installs each reference as written and looks nothing up.
++func TestPrebuiltImageMapPinsVerbatim(t *testing.T) {
++	m, err := images.ParseImageMap([]byte(testImageMap()))
++	if err != nil {
++		t.Fatal(err)
++	}
++	registry := newStubRegistry()
++	p := images.NewPrebuilt(images.Source{MapFile: "/m", Map: m}, registry.digest)
++	got, err := p.Pin(context.Background(), "envoy-dataplane")
++	if err != nil || got != testNixRef("envoy-dataplane") {
++		t.Errorf("Pin(envoy-dataplane) = %q, %v; want %q", got, err, testNixRef("envoy-dataplane"))
++	}
++	delete(m.Images, "atelet")
++	if _, err := p.Pin(context.Background(), "atelet"); err == nil || !strings.Contains(err.Error(), "has no atelet") {
++		t.Errorf("Pin(unmapped) = %v, want the image map named", err)
++	}
++	if len(registry.calls) != 0 {
++		t.Errorf("an image map looked up %v", registry.calls)
++	}
++}
++
++// Every install manifest resolves from a map of Nix references, which
++// reach the manifests unchanged.
++func TestResolveEveryInstallManifestFromAnImageMap(t *testing.T) {
++	root, err := config.RepoRoot()
++	if err != nil {
++		t.Fatalf("resolving repo root: %v", err)
++	}
++	m, err := images.ParseImageMap([]byte(testImageMap()))
++	if err != nil {
++		t.Fatal(err)
++	}
++	resolver := images.NewPrebuilt(images.Source{MapFile: "/m", Map: m}, newStubRegistry().digest)
++	installDir := filepath.Join(root, "manifests", "ate-install")
++	entries, err := os.ReadDir(installDir)
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, entry := range entries {
++		if entry.IsDir() || filepath.Ext(entry.Name()) != ".yaml" {
++			continue
++		}
++		t.Run(entry.Name(), func(t *testing.T) {
++			manifest, err := kube.ReadPath(filepath.Join(installDir, entry.Name()))
++			if err != nil {
++				t.Fatal(err)
++			}
++			out, err := resolver.ResolveBytes(context.Background(), manifest)
++			if err != nil {
++				t.Fatalf("ResolveBytes() = %v", err)
++			}
++			if refs := koRefPattern.FindAllString(string(out), -1); len(refs) > 0 {
++				t.Errorf("unresolved references survived: %v", refs)
++			}
++			if strings.Contains(string(manifest), "ko://") && !strings.Contains(string(out), "nix:0/nix/store/") {
++				t.Error("no nix:0 reference reached the manifest")
++			}
++			if _, err := kube.DecodeManifestBytes(out); err != nil {
++				t.Errorf("the resolved manifest no longer parses: %v", err)
++			}
++		})
++	}
++}
+diff --git a/cmd/ate-setup/internal/images/builtmap_test.go b/cmd/ate-setup/internal/images/builtmap_test.go
+new file mode 100644
+--- /dev/null
++++ b/cmd/ate-setup/internal/images/builtmap_test.go
+@@ -0,0 +1,97 @@
++// Copyright 2026 The Agent Substrate Authors
++// SPDX-License-Identifier: Apache-2.0
++
++package images_test
++
++import (
++    "context"
++    "os"
++    "path/filepath"
++    "strings"
++    "testing"
++
++    "go.ate.dev/substrate/cmd/ate-setup/internal/config"
++    "go.ate.dev/substrate/cmd/ate-setup/internal/images"
++)
++
++// Exercise every map name through the real resolver, including worker pod
++// images and actor templates. No registry operation is permitted.
++func TestImageMapRuntimeRoles(t *testing.T) {
++    m, err := images.ParseImageMap([]byte(testImageMap()))
++    if err != nil { t.Fatal(err) }
++    registry := newStubRegistry()
++    resolver := images.NewPrebuilt(images.Source{MapFile: "/m", Map: m}, registry.digest)
++    for _, component := range images.Components {
++        name := images.ImageName(component)
++        want := m.Images[name]
++        if strings.HasPrefix(component, "demos/") {
++            if !strings.HasPrefix(want, "nix:/nix/store/") { t.Fatalf("actor %s has %s", name, want) }
++        } else if !strings.HasPrefix(want, "nix:0/nix/store/") {
++            t.Fatalf("pod/worker %s has %s", name, want)
++        }
++        got, err := resolver.ResolveBytes(context.Background(), []byte("image: " + images.KoReference(component)))
++        if err != nil || string(got) != "image: " + want { t.Fatalf("%s: %s, %v", component, got, err) }
++    }
++    for _, name := range images.ExtraImages {
++        if got, err := resolver.Pin(context.Background(), name); err != nil || got != m.Images[name] {
++            t.Fatalf("%s: %s, %v", name, got, err)
++        }
++    }
++    if len(registry.calls) != 0 { t.Fatalf("registry calls: %v", registry.calls) }
++}
++
++// The Nix package check supplies the actual generated map, not a synthetic
++// reference fixture. Ordinary upstream test runs do not require Nix outputs.
++func TestBuiltImageMapMatchesInstallSources(t *testing.T) {
++    path := os.Getenv("ATE_TEST_IMAGE_MAP")
++    if path == "" { t.Skip("set ATE_TEST_IMAGE_MAP to check the built Nix image set") }
++    m, err := images.ReadImageMap(path)
++    if err != nil { t.Fatal(err) }
++    if len(m.Images) != len(images.Components)+len(images.ExtraImages) || len(m.References) != 6 {
++        t.Fatalf("map has %d named and %d third-party images", len(m.Images), len(m.References))
++    }
++    root, err := config.RepoRoot()
++    if err != nil { t.Fatal(err) }
++    registry := newStubRegistry()
++    resolver := images.NewPrebuilt(images.Source{MapFile: path, Map: m}, registry.digest)
++    consumed := map[string]bool{}
++    for _, directory := range installTrees {
++        err := filepath.WalkDir(filepath.Join(root, directory), func(path string, entry os.DirEntry, err error) error {
++            if err != nil { return err }
++            ext := filepath.Ext(strings.TrimSuffix(path, ".tmpl"))
++            if entry.IsDir() || (ext != ".yaml" && ext != ".yml" && ext != ".json") { return nil }
++            content, err := os.ReadFile(path)
++            if err != nil { return err }
++            for name := range m.Images {
++                for _, component := range images.Components {
++                    if images.ImageName(component) == name && strings.Contains(string(content), images.KoReference(component)) {
++                        consumed[name] = true
++                    }
++                }
++            }
++            for ref := range m.References {
++                if strings.Contains(string(content), ref) { consumed[ref] = true }
++            }
++            out, err := resolver.ResolveBytes(context.Background(), content)
++            if err != nil { return err }
++            if koRefPattern.Match(out) { t.Errorf("%s: unresolved ko reference", path) }
++            for ref := range m.References {
++                if strings.Contains(string(out), ref) { t.Errorf("%s: unreplaced %s", path, ref) }
++            }
++            return nil
++        })
++        if err != nil { t.Fatal(err) }
++    }
++    // Envoy's placeholder is resolved separately via Pin by the installer.
++    if _, err := resolver.Pin(context.Background(), "envoy-dataplane"); err != nil { t.Fatal(err) }
++    consumed["envoy-dataplane"] = true
++    for name := range m.Images {
++        // Every map name must have a real consumer in the same installTrees
++        // the existing upstream component-coverage test enumerates.
++        if !consumed[name] { t.Errorf("unused component map entry %s", name) }
++    }
++    for ref := range m.References {
++        if !consumed[ref] { t.Errorf("unused third-party map entry %s", ref) }
++    }
++    if len(registry.calls) != 0 { t.Fatalf("registry calls: %v", registry.calls) }
++}
+diff --git a/cmd/ate-setup/internal/images/images.go b/cmd/ate-setup/internal/images/images.go
+index 79ab3f9a..e0945533 100644
+--- a/cmd/ate-setup/internal/images/images.go
++++ b/cmd/ate-setup/internal/images/images.go
+@@ -132,14 +132,23 @@ type Source struct {
+ 	// Tag is the tag every component image carries. Releases tag all
+ 	// components together, so one tag covers the set.
+ 	Tag string
++
++	// MapFile names an image map (see ReadImageMap) and Map is its content:
++	// each image's reference, installed as written. An image map excludes
++	// Repo and Tag.
++	MapFile string
++	Map     *ImageMap
+ }
+ 
+ // IsPrebuilt reports whether images should be pulled rather than built.
+-func (s Source) IsPrebuilt() bool { return s.Repo != "" }
++func (s Source) IsPrebuilt() bool { return s.Repo != "" || s.Map != nil }
+ 
+ // Describe renders the source for the install log.
+ func (s Source) Describe() string {
+-	if !s.IsPrebuilt() {
++	switch {
++	case s.Map != nil:
++		return fmt.Sprintf("pre-built, as named by the image map %s", s.MapFile)
++	case !s.IsPrebuilt():
+ 		return "built from source with ko"
+ 	}
+ 	return fmt.Sprintf("pre-built from %s, tag %s", s.Repo, s.Tag)
+diff --git a/cmd/ate-setup/internal/images/prebuilt.go b/cmd/ate-setup/internal/images/prebuilt.go
+index eb3227e9..ca8c624b 100644
+--- a/cmd/ate-setup/internal/images/prebuilt.go
++++ b/cmd/ate-setup/internal/images/prebuilt.go
+@@ -87,6 +87,15 @@ func (p *Prebuilt) ResolveBytes(ctx context.Context, manifest []byte) ([]byte, e
+ // the digest is ko's own output shape, and leaves the reference legible in
+ // `kubectl get`.
+ func (p *Prebuilt) Pin(ctx context.Context, image string) (string, error) {
++	if p.src.Map != nil {
++		// An image map names each reference already pinned; a nix:0 one
++		// is resolved on the node and must reach the manifest unchanged.
++		ref, ok := p.src.Map.Images[image]
++		if !ok {
++			return "", fmt.Errorf("image map %s has no %s", p.src.MapFile, image)
++		}
++		return ref, nil
++	}
+ 	tagged := p.src.Repo + "/" + image + ":" + p.src.Tag
+ 	// A tag that already carries one is pinned as it stands. Looking it up
+ 	// would only append the same digest a second time, and the reference the
+@@ -106,7 +115,8 @@ func (p *Prebuilt) Pin(ctx context.Context, image string) (string, error) {
+ 	return ref, nil
+ }
+ 
+-// rewrite replaces every ko:// reference with the image it maps to.
++// rewrite replaces every ko:// reference with the image it maps to, and with
++// an image map also every exact reference the map replaces.
+ //
+ // Substitution is textual. References appear in CRD fields as well as pod
+ // specs (a WorkerPool's spec.workerImage, an ActorTemplate's image), so a
+@@ -159,5 +169,8 @@ func (p *Prebuilt) rewrite(ctx context.Context, manifest []byte) ([]byte, error)
+ 	if len(errs) > 0 {
+ 		return nil, errors.Join(errs...)
+ 	}
++	if p.src.Map != nil {
++		out = p.src.Map.ReplaceReferences(out)
++	}
+ 	return out, nil
+ }
+diff --git a/cmd/ate-setup/internal/steps/postgres.go b/cmd/ate-setup/internal/steps/postgres.go
+index 8e529cc0..9d9d11a4 100644
+--- a/cmd/ate-setup/internal/steps/postgres.go
++++ b/cmd/ate-setup/internal/steps/postgres.go
+@@ -187,6 +187,11 @@ func (e *Env) postgresObjects() ([]*unstructured.Unstructured, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	// The database is no component, so its manifest skips image resolution;
++	// an image map still replaces the image it pins.
++	if m := e.Cfg.Images.Map; m != nil {
++		manifest = m.ReplaceReferences(manifest)
++	}
+ 	objs, err := kube.DecodeManifestBytes(manifest)
+ 	if err != nil {
+ 		return nil, err
+diff --git a/cmd/ate-setup/internal/steps/postgres_test.go b/cmd/ate-setup/internal/steps/postgres_test.go
+index 7a956b9a..6b01ff03 100644
+--- a/cmd/ate-setup/internal/steps/postgres_test.go
++++ b/cmd/ate-setup/internal/steps/postgres_test.go
+@@ -28,6 +28,7 @@ import (
+ 	"k8s.io/apimachinery/pkg/runtime"
+ 
+ 	"go.ate.dev/substrate/cmd/ate-setup/internal/config"
++	"go.ate.dev/substrate/cmd/ate-setup/internal/images"
+ 	"go.ate.dev/substrate/cmd/ate-setup/internal/kube"
+ 	"go.ate.dev/substrate/pkg/postgressetup"
+ )
+@@ -499,3 +500,57 @@ func projectedFileSigner(t *testing.T, pod corev1.PodSpec, path string, trust bo
+ 	t.Fatalf("no projected %s in pod", path)
+ 	return ""
+ }
++
++// The database's manifest skips image resolution, so the image map has to
++// reach it on its own: with a map that replaces the pinned image, both the
++// server and its tls-reloader sidecar install the replacement, and without one the manifest keeps the upstream image.
++func TestPostgresObjectsReplaceMappedImage(t *testing.T) {
++	upstream := postgresImages(t, postgresObjects(t, true))
++	if len(upstream) != 2 || upstream[0] != upstream[1] || !strings.Contains(upstream[0], "@sha256:") {
++		t.Fatalf("postgres images = %v, want one digest-pinned image for both containers", upstream)
++	}
++	nixRef := "nix:0/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nix-image-postgres.tar"
++	m, err := images.ParseImageMap([]byte(upstream[0] + " " + nixRef + "\n"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	for name, tc := range map[string]struct {
++		source images.Source
++		want   string
++	}{
++		"image map":    {images.Source{MapFile: "/m", Map: m}, nixRef},
++		"no image map": {images.Source{}, upstream[0]},
++	} {
++		t.Run(name, func(t *testing.T) {
++			e := &Env{Cfg: &config.Config{Root: repoRoot(t), Kind: true, Images: tc.source}}
++			objs, err := e.postgresObjects()
++			if err != nil {
++				t.Fatalf("postgresObjects() = %v", err)
++			}
++			for _, got := range postgresImages(t, objs) {
++				if got != tc.want {
++					t.Errorf("postgres image = %q, want %q", got, tc.want)
++				}
++			}
++		})
++	}
++}
++
++// postgresImages lists the images of statefulset/postgres: its init
++// containers, then its containers.
++func postgresImages(t *testing.T, objs []*unstructured.Unstructured) []string {
++	t.Helper()
++	ss := findObject(objs, "StatefulSet", "postgres")
++	if ss == nil {
++		t.Fatal("no statefulset/postgres")
++	}
++	var set appsv1.StatefulSet
++	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(ss.Object, &set); err != nil {
++		t.Fatalf("converting statefulset/postgres: %v", err)
++	}
++	var out []string
++	for _, c := range append(set.Spec.Template.Spec.InitContainers, set.Spec.Template.Spec.Containers...) {
++		out = append(out, c.Image)
++	}
++	return out
++}
+diff --git a/cmd/ate-setup/internal/steps/version.go b/cmd/ate-setup/internal/steps/version.go
+index fdd15449..2b560288 100644
+--- a/cmd/ate-setup/internal/steps/version.go
++++ b/cmd/ate-setup/internal/steps/version.go
+@@ -32,6 +32,10 @@ func (e *Env) SubstrateVersion() string {
+ 		if v := os.Getenv("VERSION"); v != "" {
+ 			return v
+ 		}
++		// An image map carries no version; VERSION names it.
++		if e.Cfg.Images.Map != nil {
++			return "image-map"
++		}
+ 		// The tag may carry its digest (v1@sha256:...); the version
+ 		// is the tag alone.
+ 		v, _, _ := strings.Cut(e.Cfg.Images.Tag, "@")

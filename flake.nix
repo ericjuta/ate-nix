@@ -24,9 +24,19 @@
         ate-substrate = final.callPackage ./pkgs/ate-substrate.nix { };
         ateNixImage = final.callPackage ./pkgs/ate-nix-image.nix { };
         ateImages = final.callPackage ./pkgs/ate-images.nix { };
+        ateNixSnapshotter = import ./pkgs/nix-snapshotter { pkgs = final; };
+        ateRegistryFree = import ./pkgs/registry-free-substrate {
+          pkgs = final;
+          substrate = final.ate-substrate;
+          snapshotter = final.ateNixSnapshotter;
+        };
       };
 
       nixosModules.ate-node = ./modules/ate-node.nix;
+      nixosModules.nix-snapshotter = ./modules/nix-snapshotter.nix;
+
+      legacyPackages = nixpkgs.lib.genAttrs
+        [ "x86_64-linux" "aarch64-linux" ] pkgsFor;
 
       packages = nixpkgs.lib.genAttrs systems (system: rec {
         inherit (pkgsFor system) ate-env ate-substrate;
@@ -116,6 +126,13 @@
           };
       }
       // nixpkgs.lib.optionalAttrs (nixpkgs.lib.hasSuffix "-linux" system) {
+        nix-snapshotter = (pkgsFor system).ateNixSnapshotter;
+        substrate-image-map = (pkgsFor system).ateRegistryFree.imageMap;
+        substrate-nix-bundle = (pkgsFor system).ateRegistryFree.closureBundle;
+        substrate-image-map-check = (pkgsFor system).ateRegistryFree.imageMapCheck;
+        substrate-installer-tests = (pkgsFor system).ateRegistryFree.installerTests;
+        substrate-envoy-module-check = (pkgsFor system).ateRegistryFree.envoy.check;
+
         # Container images of the patched binaries, as `docker load` tarballs.
         atelet-image = (pkgsFor system).ateImages.atelet;
         ateapi-image = (pkgsFor system).ateImages.ateapi;
@@ -149,6 +166,8 @@
               '';
         }
         // nixpkgs.lib.optionalAttrs (nixpkgs.lib.hasSuffix "-linux" system) {
+          registry-free-node = import ./pkgs/nix-snapshotter/check.nix { inherit pkgs; };
+
           # The NixOS module evaluates in a minimal system, none of its
           # assertions fail, and the node's Nix configuration comes out with
           # the signature rule and the given cache and key.

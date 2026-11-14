@@ -11,10 +11,14 @@ pkgs/
   ate-substrate.nix       atelet, ateapi, installer and plugin: upstream pin + patches/substrate
   ate-nix-image.nix       ateNixImage: builds a Nix image root
   ate-images.nix          container images of atelet and ateapi
+  nix-snapshotter/        pinned snapshotter, pause archive, containerd VM check
+  registry-free-substrate/ closure-backed pod packages, actor roots and image map
 patches/
   env/                    applied to agent-substrate/env
   substrate/              applied to agent-substrate/substrate
-modules/ate-node.nix      NixOS module for a node
+  nix-snapshotter/         generic upstream snapshotter fixes
+modules/ate-node.nix      NixOS module for an actor node
+modules/nix-snapshotter.nix optional standalone containerd/kubelet integration
 kind/                     local proof: cluster patch, node setup, checks
 examples/reference/       a project that uses this flake: dev shell, app, two images
 docs/                     this documentation
@@ -30,6 +34,7 @@ No upstream code is stored here. Each `pkgs/*.nix` file names an upstream commit
 | `agent-substrate/env` | commit `56424de763f91daa6b6c38f6249bacef1d82e5e1` (main, 2026-11-01). No tag exists after `v0.0.10`. |
 | `go.ate.dev/substrate` inside env | `v1.0.0`, set by `patches/env/0002-substrate-v1.0.0.patch` |
 | Original PTY patch | <https://gist.github.com/SamuelLHuber/5d420731d5d6bbd034daa8f02eae9b96> at revision `a625acf1ae16dcc8015d10fed76cf7bd1a75d010` |
+| nix-snapshotter | `v0.4.0`; source and globset dependency hashes in `pkgs/nix-snapshotter/default.nix` |
 | `nixpkgs` | `nixos-unstable`, locked in `flake.lock` |
 
 ## Patches
@@ -39,6 +44,9 @@ No upstream code is stored here. Each `pkgs/*.nix` file names an upstream commit
 | `patches/substrate/0001-atelet-nix-image-source.patch` | substrate v1.0.0 | Nix store paths as actor images. Written for this repository. |
 | `patches/substrate/0002-existing-cluster-installer.patch` | substrate v1.0.0 | Provider-neutral existing-cluster installation and pinned installer resources. |
 | `patches/substrate/0003-overlayfs-legacy-fallback.patch` | substrate v1.0.0 | Legacy overlay mount compatibility with explicit option and path bounds. |
+| `patches/substrate/0009-ate-setup-image-map.patch` | substrate v1.0.0 + existing-cluster profile | Installer component/exact-reference mapping without registry tag resolution; actor roots remain separate from pod archives. |
+| `patches/nix-snapshotter/nix-snapshotter-183-store-path-mount-type.patch` | nix-snapshotter v0.4.0 | Store-path bind mount classification for containerd user/group lookup. |
+| `patches/nix-snapshotter/nix-snapshotter-builder-error-output.patch` | nix-snapshotter v0.4.0 | Bounded substitution diagnostics returned to CRI callers. |
 | `patches/env/0001-pty-process-streams.patch` | env `56424de` | PTY streams. Samuel Huber's patch, rebased. [pty.md](pty.md) lists the one part that was dropped. |
 | `patches/env/0002-substrate-v1.0.0.patch` | env `56424de` | `go.mod` and `go.sum` only: Substrate v1.0.0. |
 
@@ -93,7 +101,7 @@ nix flake check -L
 ```
 
 The first command builds every check of the flake for your system: both packages with their Go tests, all images, ShellCheck on the `kind/` scripts, and an evaluation of the NixOS module. The second does the same for the reference project.
-CI (`.github/workflows/ci.yml`) runs both on each pull request, on `x86_64-linux` and `aarch64-linux`. CI does not start a cluster.
+CI (`.github/workflows/ci.yml`) runs both on each pull request, on `x86_64-linux` and `aarch64-linux`. Linux checks also include image-map validation, an Envoy dynamic-module check, and a disposable NixOS VM with standalone containerd. That VM is not a complete Substrate/Kubernetes cluster.
 
 - A change to the substrate patch needs the local proof (`kind/prove.sh`, `kind/private-cache.sh`). If you did not run it, say so.
 - Update [proof.md](proof.md) only with results that you saw. Put all other items in "Not proven".

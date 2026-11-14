@@ -1,0 +1,47 @@
+nix-snapshotter#183: containers fail with "open /nix/store/...: not a directory".
+
+Cause: containerd >= 2.2 reads the container's /etc/passwd and /etc/group through
+pkg/oci withReadonlyFS, which first tries internal/fsview.FSMounts. FSMounts looks only at the
+last mount of the list and, when it is a "bind" mount, opens that mount's Source as the root
+filesystem, ignoring that a mount with a Target is a submount. nix-snapshotter returns the rootfs
+overlay followed by one "bind" mount per closure path, sorted by path, so the last mount is the
+closure path with the highest hash: if that path is a file (a writeText, the image's
+config-*.json), container creation fails with ENOTDIR; otherwise /etc/group is read from a store
+path instead of the rootfs. CRI calls it on every CreateContainer (WithAdditionalGIDs under the
+default supplementalGroupsPolicy Merge), so whether an image works depends on its hashes.
+
+Fix: emit the store path mounts with type "none" and the same "ro", "rbind" options. mount(2)
+treats them as the same bind mounts, fsview does not claim the list (ErrNotImplemented), and
+containerd falls back to mounting the whole list read-only and reading the real rootfs.
+
+Applies to standalone upstream nix-snapshotter v0.4.0.
+
+--- a/pkg/nix/snapshotter.go
++++ b/pkg/nix/snapshotter.go
+@@ -383,8 +383,14 @@
+ 			pathsSeen[nixStorePath] = struct{}{}
+ 
+ 			log.G(ctx).Debugf("[nix-snapshotter] Bind mounting nix store path %s", nixStorePath)
++			// The "rbind" option makes this a bind mount; the type stays "none" because
++			// containerd >= 2.2 (pkg/oci withReadonlyFS, internal/fsview) treats a list
++			// ending in a "bind" mount as that bind's source being the whole root
++			// filesystem: it opens the last store path as the root, which fails with
++			// ENOTDIR when that path is a file (nix-snapshotter#183) and reads the wrong
++			// tree otherwise. An unknown type makes it mount the list instead.
+ 			mounts = append(mounts, mount.Mount{
+-				Type:   "bind",
++				Type:   "none",
+ 				Source: nixStorePath,
+ 				Target: nixStorePath,
+ 				Options: []string{
+--- a/pkg/nix/snapshotter_test.go
++++ b/pkg/nix/snapshotter_test.go
+@@ -171,7 +171,7 @@
+ 		expectedMounts = append(expectedMounts,
+ 			mount.Mount{
+-				Type:    "bind",
++				Type:    "none",
+ 				Source:  nixStorePath,
+ 				Target:  nixStorePath,
+ 				Options: []string{"ro", "rbind"},
+ 			})
