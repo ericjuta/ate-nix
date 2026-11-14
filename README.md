@@ -42,6 +42,23 @@ nix build .#ate-env && ./result/bin/ate-env --help
 No Nix on your machine? [docs/getting-started.md](docs/getting-started.md) shows the same build with only Docker.
 To see an actor boot from a store path on a local throwaway cluster, follow [kind/README.md](kind/README.md).
 
+### Install outside GKE
+
+`ate-substrate` also supplies `ate-setup` and `kubectl-ate`. The installer
+includes its pinned manifests, so prebuilt-image deployments work from any
+directory:
+
+```sh
+nix build .#ate-substrate
+./result/bin/ate-setup deploy ate-system --existing-cluster --help
+```
+
+The existing-cluster profile uses your kubeconfig rather than GCP discovery
+or a local Docker/Kind preflight. It still requires the upstream certificate
+APIs, Linux node capabilities, persistent storage, and snapshot storage.
+See [docs/operating.md](docs/operating.md) for the complete publishing and
+installation procedure, including the older-kernel worker compatibility path.
+
 ## Documentation
 
 New here? Start with [docs/README.md](docs/README.md).

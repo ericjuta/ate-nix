@@ -1,0 +1,244 @@
+Legacy overlayfs compatibility for Agent Substrate v1.0.0.
+
+Base: b34fbee742906494b5eb4f1f36987176bf8770a4.
+Adapted from Sam Huber's Linux 6.1 overlay fallback. Keep the incremental
+mount API as the default and fall back only for unsupported API operations.
+Bound and validate legacy options; retain both errors when fallback fails.
+The consumer is the worker image, which must be rebuilt from this source.
+
+diff --git a/internal/imagecache/bundle_linux.go b/internal/imagecache/bundle_linux.go
+--- a/internal/imagecache/bundle_linux.go
++++ b/internal/imagecache/bundle_linux.go
+@@ -163,13 +163,31 @@
+ // An empty upper mounts the overlay without a writable layer, which overlayfs
+ // makes read-only.
+ //
+-// Requires overlayfs's "lowerdir+" option: Linux 6.7+, or 6.6.23+ where it was
+-// backported.
++// The incremental API requires Linux 6.7+, or 6.6.23+ where lowerdir+ was
++// backported. Older kernels fall back to mount(2) within its single-page limit.
++// Permission, upper/work-directory, and mount-attachment errors do not trigger
++// the fallback.
+ // https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=24e16e385f2272b1a9df51337a5c32d28a29c7ad
+ // https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/commit/?id=cc0918b3582c98f12cfb30bf7496496d14bff3e9
+ func mountOverlay(mountpoint string, lowers []string, upper, work string) error {
++	err := mountOverlayNew(mountpoint, lowers, upper, work)
++	if !errors.Is(err, errOverlayMountAPIUnsupported) {
++		return err
++	}
++	if legacyErr := mountOverlayLegacy(mountpoint, lowers, upper, work); legacyErr != nil {
++		return fmt.Errorf("incremental overlay mount failed: %w; legacy mount also failed: %w", err, legacyErr)
++	}
++	return nil
++}
++
++var errOverlayMountAPIUnsupported = errors.New("incremental overlay mount API is unavailable")
++
++func mountOverlayNew(mountpoint string, lowers []string, upper, work string) error {
+ 	fsfd, err := unix.Fsopen("overlay", unix.FSOPEN_CLOEXEC)
+ 	if err != nil {
++		if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EOPNOTSUPP) {
++			return fmt.Errorf("%w: while opening overlay fs context: %w", errOverlayMountAPIUnsupported, err)
++		}
+ 		return fmt.Errorf("while opening overlay fs context: %w", err)
+ 	}
+ 	defer unix.Close(fsfd)
+@@ -182,6 +200,9 @@
+ 	}
+ 	for _, lower := range lowers {
+ 		if err := set("lowerdir+", lower); err != nil {
++			if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.EOPNOTSUPP) {
++				return fmt.Errorf("%w: %w", errOverlayMountAPIUnsupported, err)
++			}
+ 			return err
+ 		}
+ 	}
+@@ -215,6 +236,73 @@
+ 		return fmt.Errorf("while attaching overlay at %q: %w", mountpoint, err)
+ 	}
+ 	return nil
++}
++
++func mountOverlayLegacy(mountpoint string, lowers []string, upper, work string) error {
++	data, err := legacyOverlayOptions(lowers, upper, work)
++	if err != nil {
++		return err
++	}
++	if err := unix.Mount("overlay", mountpoint, "overlay", 0, data); err != nil {
++		return fmt.Errorf("while mounting overlay with mount(2): %w", err)
++	}
++	return nil
++}
++
++// legacyOverlayOptions refuses paths the option string cannot represent
++// unambiguously. The incremental API accepts these paths individually, so this
++// restriction applies only to kernels taking the compatibility path.
++func legacyOverlayOptions(lowers []string, upper, work string) (string, error) {
++	if len(lowers) == 0 {
++		return "", fmt.Errorf("legacy overlay mount requires at least one lowerdir")
++	}
++	if (upper == "") != (work == "") {
++		return "", fmt.Errorf("legacy overlay mount requires upperdir and workdir together")
++	}
++	size := len("lowerdir=") + len(lowers) - 1 + len(",volatile")
++	checkPath := func(path string) error {
++		if !filepath.IsAbs(path) || strings.ContainsAny(path, ":,\\\x00") {
++			return fmt.Errorf("legacy overlay cannot encode path %q: use absolute paths without colon, comma, backslash, or NUL", path)
++		}
++		// Bound the sum before adding, not after allocating the option string.
++		if len(path) >= os.Getpagesize()-size {
++			return fmt.Errorf("legacy overlay mount options exceed the %d-byte page limit; use fewer layers or a kernel with lowerdir+ support", os.Getpagesize())
++		}
++		size += len(path)
++		return nil
++	}
++	for _, lower := range lowers {
++		if err := checkPath(lower); err != nil {
++			return "", err
++		}
++	}
++	if upper != "" {
++		size += len(",upperdir=,workdir=")
++		if err := checkPath(upper); err != nil {
++			return "", err
++		}
++		if err := checkPath(work); err != nil {
++			return "", err
++		}
++	}
++
++	var data strings.Builder
++	data.Grow(size)
++	data.WriteString("lowerdir=")
++	for i, lower := range lowers {
++		if i > 0 {
++			data.WriteByte(':')
++		}
++		data.WriteString(lower)
++	}
++	if upper != "" {
++		data.WriteString(",upperdir=")
++		data.WriteString(upper)
++		data.WriteString(",workdir=")
++		data.WriteString(work)
++	}
++	data.WriteString(",volatile")
++	return data.String(), nil
+ }
+ 
+ // fsContextLog drains the human-readable message log the kernel queues on an
+diff --git a/internal/imagecache/overlay_legacy_linux_test.go b/internal/imagecache/overlay_legacy_linux_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/imagecache/overlay_legacy_linux_test.go
+@@ -0,0 +1,110 @@
++// Copyright 2026 Google LLC
++// SPDX-License-Identifier: Apache-2.0
++
++package imagecache
++
++import (
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"golang.org/x/sys/unix"
++)
++
++func TestLegacyOverlayOptions(t *testing.T) {
++	for _, tc := range []struct {
++		name         string
++		lowers       []string
++		upper, work  string
++		want, errSub string
++	}{
++		{name: "writable", lowers: []string{"/top", "/bottom"}, upper: "/upper", work: "/work", want: "lowerdir=/top:/bottom,upperdir=/upper,workdir=/work,volatile"},
++		{name: "read-only", lowers: []string{"/top", "/bottom"}, want: "lowerdir=/top:/bottom,volatile"},
++		{name: "no layers", errSub: "at least one lowerdir"},
++		{name: "missing work", lowers: []string{"/lower"}, upper: "/upper", errSub: "together"},
++		{name: "missing upper", lowers: []string{"/lower"}, work: "/work", errSub: "together"},
++		{name: "relative", lowers: []string{"relative"}, errSub: "cannot encode"},
++		{name: "empty path", lowers: []string{""}, errSub: "cannot encode"},
++		{name: "colon", lowers: []string{"/one:/two"}, errSub: "cannot encode"},
++		{name: "comma", lowers: []string{"/one,two"}, errSub: "cannot encode"},
++		{name: "backslash", lowers: []string{`/one\two`}, errSub: "cannot encode"},
++		{name: "NUL", lowers: []string{"/one\x00two"}, errSub: "cannot encode"},
++		{name: "upper delimiter", lowers: []string{"/lower"}, upper: "/upper,volatile", work: "/work", errSub: "cannot encode"},
++		{name: "work delimiter", lowers: []string{"/lower"}, upper: "/upper", work: "/work:other", errSub: "cannot encode"},
++		{name: "page limit", lowers: []string{"/" + strings.Repeat("x", os.Getpagesize())}, errSub: "page limit"},
++		{name: "many layers", lowers: make([]string, os.Getpagesize()), errSub: "cannot encode"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			got, err := legacyOverlayOptions(tc.lowers, tc.upper, tc.work)
++			if tc.errSub != "" {
++				if err == nil || !strings.Contains(err.Error(), tc.errSub) {
++					t.Fatalf("error=%v, want %q", err, tc.errSub)
++				}
++				return
++			}
++			if err != nil || got != tc.want {
++				t.Fatalf("options=%q error=%v, want %q", got, err, tc.want)
++			}
++		})
++	}
++}
++
++func TestLegacyOverlayOptionsPageBoundary(t *testing.T) {
++	fixed := len("lowerdir=,volatile")
++	lower := "/" + strings.Repeat("x", os.Getpagesize()-fixed-2)
++	options, err := legacyOverlayOptions([]string{lower}, "", "")
++	if err != nil || len(options) != os.Getpagesize()-1 {
++		t.Fatalf("page-minus-one options length=%d error=%v", len(options), err)
++	}
++	if _, err := legacyOverlayOptions([]string{lower + "x"}, "", ""); err == nil {
++		t.Fatal("accepted options at the page-size limit")
++	}
++}
++
++// Run explicitly as root with CAP_SYS_ADMIN on both a 6.1 kernel and a kernel
++// with lowerdir+ support. This always exercises mount(2).
++func TestLegacyOverlayMount(t *testing.T) {
++	testOverlayMount(t, mountOverlayLegacy)
++}
++
++// On an older kernel this proves fallback selection; on a newer kernel it
++// proves the default incremental path still composes the same writable view.
++func TestOverlayAutomaticMount(t *testing.T) {
++	testOverlayMount(t, mountOverlay)
++}
++
++func testOverlayMount(t *testing.T, mount func(string, []string, string, string) error) {
++	t.Helper()
++	if os.Geteuid() != 0 {
++		t.Skip("requires root and CAP_SYS_ADMIN")
++	}
++	root := t.TempDir()
++	for _, dir := range []string{"lower", "upper", "work", "merged"} {
++		if err := os.Mkdir(filepath.Join(root, dir), 0o700); err != nil {
++			t.Fatal(err)
++		}
++	}
++	lower := filepath.Join(root, "lower")
++	if err := os.WriteFile(filepath.Join(lower, "file"), []byte("lower"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	merged := filepath.Join(root, "merged")
++	if err := mount(merged, []string{lower}, filepath.Join(root, "upper"), filepath.Join(root, "work")); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() {
++		if err := unix.Unmount(merged, 0); err != nil {
++			t.Errorf("unmount: %v", err)
++		}
++	})
++	if got, err := os.ReadFile(filepath.Join(merged, "file")); err != nil || string(got) != "lower" {
++		t.Fatalf("merged file=%q error=%v", got, err)
++	}
++	if err := os.WriteFile(filepath.Join(merged, "file"), []byte("upper"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	if got, err := os.ReadFile(filepath.Join(lower, "file")); err != nil || string(got) != "lower" {
++		t.Fatalf("write modified the shared lower: %q error=%v", got, err)
++	}
++}

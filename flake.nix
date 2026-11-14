@@ -176,9 +176,13 @@
               inherit (nixos) config;
               failed = builtins.filter (a: !a.assertion) config.assertions;
               bind = config.fileSystems."/var/lib/ate/nix-views";
+              storeBind = config.fileSystems."/var/lib/ate-nix";
             in
             assert failed == [ ];
             assert bind.device == "/nix/var/ate/views" && builtins.elem "bind" bind.options;
+            assert storeBind.device == "/nix" && storeBind.fsType == "none";
+            assert builtins.elem "bind" storeBind.options && builtins.elem "private" storeBind.options;
+            assert !(builtins.elem "rbind" storeBind.options);
             pkgs.runCommand "ate-nix-nixos-module" { } ''
               conf=${config.environment.etc."nix/nix.conf".source}
               grep -qx 'require-sigs = true' $conf

@@ -8,7 +8,7 @@ How the repository is laid out, how to move it to a new upstream release, and ho
 flake.nix                 outputs: packages, checks, overlay, NixOS module
 pkgs/
   ate-env.nix             env binaries: upstream pin + patches/env
-  ate-substrate.nix       atelet and ateapi: upstream pin + patches/substrate
+  ate-substrate.nix       atelet, ateapi, installer and plugin: upstream pin + patches/substrate
   ate-nix-image.nix       ateNixImage: builds a Nix image root
   ate-images.nix          container images of atelet and ateapi
 patches/
@@ -37,6 +37,8 @@ No upstream code is stored here. Each `pkgs/*.nix` file names an upstream commit
 | Patch | Applies to | Content |
 | --- | --- | --- |
 | `patches/substrate/0001-atelet-nix-image-source.patch` | substrate v1.0.0 | Nix store paths as actor images. Written for this repository. |
+| `patches/substrate/0002-existing-cluster-installer.patch` | substrate v1.0.0 | Provider-neutral existing-cluster installation and pinned installer resources. |
+| `patches/substrate/0003-overlayfs-legacy-fallback.patch` | substrate v1.0.0 | Legacy overlay mount compatibility with explicit option and path bounds. |
 | `patches/env/0001-pty-process-streams.patch` | env `56424de` | PTY streams. Samuel Huber's patch, rebased. [pty.md](pty.md) lists the one part that was dropped. |
 | `patches/env/0002-substrate-v1.0.0.patch` | env `56424de` | `go.mod` and `go.sum` only: Substrate v1.0.0. |
 

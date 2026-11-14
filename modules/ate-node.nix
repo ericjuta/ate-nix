@@ -1,6 +1,8 @@
 # Node side of the Nix image source: the view directory atelet hard-links
 # closures into, exposed to the worker pods through the /var/lib/ate mount
-# they already have. See docs/operating.md, "Prepare each node".
+# they already have. A non-recursive /nix alias keeps NixOS's read-only
+# /nix/store child mount out of atelet's hard-linking view.
+# See docs/operating.md, "Prepare each node".
 { config, lib, ... }:
 
 let
@@ -15,7 +17,9 @@ in
       default = "/nix/var/ate/views";
       description = ''
         Where atelet builds closure views (`--nix-view-dir`). It must be on
-        the same mount as /nix/store, because views are made of hard links.
+        the same underlying filesystem as /nix/store, because views are made
+        of hard links. Atelet sees both through the non-recursive /nix alias
+        at /var/lib/ate-nix, mounted in its container as /nix.
       '';
     };
 
@@ -54,9 +58,23 @@ in
     ];
 
     systemd.tmpfiles.rules = [
+      "d /var/lib/ate-nix 0755 root root -"
       "d ${cfg.viewDir} 0755 root root -"
       "d ${cfg.mountDir} 0755 root root -"
     ];
+
+    # "bind", not "rbind": copying /nix/store's read-only child mount would
+    # leave store files and the view directory on different mount objects,
+    # making link(2) fail with EXDEV. Keep this alias private so later child
+    # mounts under the source cannot propagate into it either.
+    fileSystems."/var/lib/ate-nix" = {
+      device = "/nix";
+      fsType = "none";
+      options = [
+        "bind"
+        "private"
+      ];
+    };
 
     fileSystems.${cfg.mountDir} = {
       device = cfg.viewDir;

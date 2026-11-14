@@ -1,0 +1,1054 @@
+Portable existing-cluster installation for Agent Substrate v1.0.0.
+
+Base: b34fbee742906494b5eb4f1f36987176bf8770a4.
+Adapted from Sam Huber's install-hook work. Replace a deployment-specific
+preflight bypass with an explicit nonlocal profile, preserving Kind and GKE
+defaults. Read credentials from an operator-managed S3 Secret, carry pinned
+source resources without changing directory, and retain upstream image
+repository/tag resolution. No local object store or monitoring stack.
+
+diff --git a/cmd/ate-setup/commands.md b/cmd/ate-setup/commands.md
+index 0b91ed1..030f3a1 100644
+--- a/cmd/ate-setup/commands.md
++++ b/cmd/ate-setup/commands.md
+@@ -19,6 +19,7 @@ every setting with its environment variable.
+ | Flag | Notes |
+ |---|---|
+ | `--kind` | Kind overlays, the local registry, and host-architecture image builds. `ATE_INSTALL_KIND=true` when the flag is absent |
++| `--existing-cluster` | Existing non-GKE cluster, S3 via `ate-snapshot-storage`, no local services or Docker/Kind preflight. `ATE_EXISTING_CLUSTER` or the install document's `existingCluster.enabled`; mutually exclusive with `--kind` |
+ | `--atenet-dataplane envoy\|agentgateway` | atenet ingress and egress dataplane (default `envoy`) |
+ | `--rollout-timeout DURATION` | Readiness timeout for workloads (default `60s`). It also governs the podcertificate-controller and CSI waits, which stay at their 120s default until it is passed |
+ | `--podcert-workers-per-signer N` | Concurrent workers per podcertificate-controller signer |
+@@ -54,6 +55,47 @@ check for `deployment/ate-controller` in the configured system namespace before
+ creating workload resources. An existing Deployment passes this check; normal
+ rollout waits still diagnose workloads that cannot become ready.
+ 
++## Existing non-GKE clusters
++
++`--existing-cluster` targets the current kubeconfig context, or the one selected
++with `--context`. It never fetches GKE credentials or sources `.ate-dev-env.sh`.
++It uses the nonlocal manifests without GKE's kubelet image-credential-provider
++mounts, local registry rewriting, RustFS, or a monitoring stack. Actor OCI
++images must be public or use separately configured registry authentication.
++Kind and GKE defaults are unchanged.
++
++The portable Agentgateway router retains the shared static-mTLS and ingress
++authorization configuration, but omits its optional tracing policy and
++GKE-specific collector address. This profile installs no collector.
++
++Create `ate-system/ate-snapshot-storage` before deploying. Its keys are the
++object-store plugin's AWS environment variables: `AWS_REGION`,
++`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and, when needed,
++`AWS_SESSION_TOKEN`, `AWS_ENDPOINT_URL` and `AWS_S3_USE_PATH_STYLE`.
++The Secret is imported only by the object-store sidecars, not actors.
++Provision the bucket separately, grant the plugin read/write/list/delete and
++multipart-copy operations, and set `--snapshot-location=s3://BUCKET/PREFIX/`.
++No bucket is created by this profile. S3 uses the plugin's credentials for all
++actors; it does not provide GCS's per-actor credential downscoping.
++
++Use `deploy ate-system --sandbox-classes=gvisor` for the portable prebuilt
++installation. The upstream default also installs microVM and stages its assets
++through a GKE/GCS or Kind-specific path; that path is not selected here.
++A portable microVM installation stages its pinned assets separately and applies
++a SandboxConfig whose asset URLs use the configured S3 backend.
++
++The cluster must expose PodCertificateRequest and ClusterTrustBundle APIs and
++support both projected volume sources. The install deploys its own
++podcertificate controller; cert-manager is not a replacement for those APIs.
++It also requires a NetworkPolicy-capable CNI, worker mount capabilities,
++standard kubelet plugin paths, and persistent storage for PostgreSQL.
++
++Packaged installers may set `ATE_SOURCE_ROOT` to an absolute pinned resource
++tree. This preserves the caller's working directory, so relative `--config`
++and `--kubeconfig` paths retain their normal meaning. Source builds still
++require Go and the pinned ko tool; Envoy additionally requires Docker buildx.
++Prebuilt gVisor installs use neither Go nor Docker.
++
+ ## Installing pre-built images
+ 
+ Without `--image-repo`, `ate-setup` builds every image from the checkout with
+@@ -70,9 +112,10 @@ ate-setup deploy ate-system \
+ ```
+ 
+ installs images already published to `REPO` instead, and never invokes `ko`.
+-The manifests still come from the checkout, so this needs one; what it removes
+-is the build and write access to a registry. Releases ship no `ate-setup`
+-binary, so running it from the checkout still needs Go. On non-Kind clusters,
++The manifests still come from the checkout or a packaged `ATE_SOURCE_ROOT`;
++what this removes is the build and write access to a registry. Upstream
++releases ship no `ate-setup` binary, so running it from a checkout still needs
++Go; a packaged installer does not. On non-Kind clusters,
+ the default `--sandbox-classes=gvisor,microvm` also stages the microVM guest
+ assets in the `<BUCKET>-assets` bucket; pass `--sandbox-classes=gvisor` to
+ install gVisor only.
+diff --git a/cmd/ate-setup/internal/cmd/root.go b/cmd/ate-setup/internal/cmd/root.go
+index 608028a..442d332 100644
+--- a/cmd/ate-setup/internal/cmd/root.go
++++ b/cmd/ate-setup/internal/cmd/root.go
+@@ -99,10 +99,13 @@ secrets and config, and the bundled demos.
+ Cluster selection follows kubeconfig: pass --context to target a specific
+ cluster, or set KUBECTL_CONTEXT. Use --kind for a local Kind cluster, which
+ selects the kind manifest overlays, the local image registry, and host-only
+-image builds.
++image builds. Use --existing-cluster for a non-GKE cluster you have already
++provisioned: it uses your kubeconfig and the ate-snapshot-storage S3 Secret,
++without Docker/Kind preflight or local development services. The two profiles
++are mutually exclusive. Without either flag the GKE profile is unchanged.
+ 
+ Developer settings are read from .ate-dev-env.sh at the repository root when it
+-is present (skipped for --kind, and by NO_DEV_ENV=1).`,
++is present (skipped for --kind, --existing-cluster, and by NO_DEV_ENV=1).`,
+ 	Version:      version.String(),
+ 	SilenceUsage: true,
+ 	// Execute prints the error itself. Without this cobra prints it too, and
+diff --git a/cmd/ate-setup/internal/config/config.go b/cmd/ate-setup/internal/config/config.go
+index 30bcd18..65fe5d2 100644
+--- a/cmd/ate-setup/internal/config/config.go
++++ b/cmd/ate-setup/internal/config/config.go
+@@ -89,6 +89,10 @@ type Config struct {
+ 	// Kind selects the local Kind install profile (ATE_INSTALL_KIND).
+ 	Kind bool
+ 
++	// ExistingCluster selects a non-GKE cluster already configured in kubeconfig.
++	// It uses S3 via the ate-snapshot-storage Secret, without Kind's local services.
++	ExistingCluster bool
++
+ 	// Namespace is the namespace the control plane is installed into, from
+ 	// ATE_NAMESPACE. It defaults to the canonical installdefaults.SystemNamespace,
+ 	// so an install that does not set it is unaffected. The checked-in manifests
+@@ -295,7 +299,7 @@ func (c *Config) Resolved() *Resolved {
+ // account, built from TransferGSAName and ProjectID the same way substrate-gke's
+ // tools/setup-gcp builds it. It is empty when either is.
+ func (c *Config) TransferServiceAccount() string {
+-	if c.TransferGSAName == "" || c.ProjectID == "" {
++	if c.ExistingCluster || c.TransferGSAName == "" || c.ProjectID == "" {
+ 		return ""
+ 	}
+ 	return c.TransferGSAName + "@" + c.ProjectID + ".iam.gserviceaccount.com"
+@@ -304,9 +308,9 @@ func (c *Config) TransferServiceAccount() string {
+ // RequireTransferServiceAccount fails when the install would deploy
+ // ate-api-server on GCS without a transfer service account. Its credential
+ // exchange impersonates the account and refuses to start without one.
+-// ate-setup installs GCS everywhere but kind, which uses S3.
++// Kind and existing-cluster installations use S3 instead of GCS.
+ func (c *Config) RequireTransferServiceAccount() error {
+-	if c.Kind {
++	if c.Kind || c.ExistingCluster {
+ 		return nil
+ 	}
+ 	if c.TransferGSAName == "" {
+@@ -491,6 +495,20 @@ func (c *Config) ScriptEnv() []string {
+ 		merged[name] = value
+ 	}
+ 
++	// A flag/file-selected existing cluster must also reach delegated helpers.
++	// Remove ambient GKE coordinates after layering the resolved values above.
++	delete(merged, "ATE_EXISTING_CLUSTER")
++	if c.ExistingCluster {
++		merged["ATE_EXISTING_CLUSTER"] = "true"
++		merged["NO_DEV_ENV"] = "true"
++		delete(merged, "ATE_INSTALL_KIND")
++		for _, name := range kindUnsetVars {
++			delete(merged, name)
++		}
++		delete(merged, "CLUSTER_NAME")
++		delete(merged, "SNAPSHOT_TRANSFER_GSA_NAME")
++	}
++
+ 	if c.RolloutTimeout > 0 {
+ 		merged["ATE_INSTALL_ROLLOUT_TIMEOUT"] = c.RolloutTimeout.String()
+ 	}
+diff --git a/cmd/ate-setup/internal/config/credentials.go b/cmd/ate-setup/internal/config/credentials.go
+index 93a6a64..21b1dfd 100644
+--- a/cmd/ate-setup/internal/config/credentials.go
++++ b/cmd/ate-setup/internal/config/credentials.go
+@@ -32,7 +32,7 @@ import (
+ // anything talks to the cluster. Setting a context (or KUBECTL_CONTEXT) is
+ // taken as "I already have credentials" and skips the call, as it did there.
+ func (c *Config) EnsureClusterCredentials(ctx context.Context) error {
+-	if c.Kind || c.Context != "" || c.ProjectID == "" {
++	if c.Kind || c.ExistingCluster || c.Context != "" || c.ProjectID == "" {
+ 		return nil
+ 	}
+ 	if c.ClusterName == "" || c.ClusterLocation == "" {
+diff --git a/cmd/ate-setup/internal/config/existingcluster_test.go b/cmd/ate-setup/internal/config/existingcluster_test.go
+new file mode 100644
+index 0000000..fc7b6a2
+--- /dev/null
++++ b/cmd/ate-setup/internal/config/existingcluster_test.go
+@@ -0,0 +1,143 @@
++// Copyright 2026 Google LLC
++// SPDX-License-Identifier: Apache-2.0
++
++package config
++
++import (
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++func TestExistingClusterSelection(t *testing.T) {
++	for _, channel := range []string{"flag", "environment", "file"} {
++		t.Run(channel, func(t *testing.T) {
++			loadEnv(t)
++			unsetEnv(t, SourceRootEnv)
++			unsetEnv(t, "ATE_EXISTING_CLUSTER")
++			fakeRepo(t)
++			fs := optionsFlagSetForTest(t)
++			opts := LoadOptions{}
++			switch channel {
++			case "flag":
++				if err := fs.Set("existing-cluster", "true"); err != nil {
++					t.Fatal(err)
++				}
++			case "environment":
++				t.Setenv("ATE_EXISTING_CLUSTER", "true")
++			case "file":
++				opts.ConfigPath = writeConfig(t, validHeader+"existingCluster:\n  enabled: true\n")
++			}
++			cfg, err := LoadFlags(fs, opts)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if !cfg.ExistingCluster || cfg.Kind {
++				t.Fatalf("ExistingCluster=%v Kind=%v", cfg.ExistingCluster, cfg.Kind)
++			}
++			if cfg.Context != "" || cfg.KODockerRepo != "" || cfg.SnapshotLocation != "" {
++				t.Fatalf("existing cluster acquired Kind defaults: context=%q repo=%q snapshots=%q", cfg.Context, cfg.KODockerRepo, cfg.SnapshotLocation)
++			}
++			if cfg.shellEnv[devEnvMarker] != "" {
++				t.Fatal("existing-cluster mode sourced the GKE developer environment")
++			}
++		})
++	}
++}
++
++func TestExistingClusterFalseOverridesEnvironment(t *testing.T) {
++	loadEnv(t)
++	t.Setenv("ATE_EXISTING_CLUSTER", "true")
++	fs := optionsFlagSetForTest(t)
++	if err := fs.Set("existing-cluster", "false"); err != nil {
++		t.Fatal(err)
++	}
++	cfg, err := LoadFlags(fs, LoadOptions{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if cfg.ExistingCluster {
++		t.Fatal("--existing-cluster=false did not outrank the environment")
++	}
++}
++
++func TestExistingClusterRejectsKind(t *testing.T) {
++	loadEnv(t)
++	t.Setenv("ATE_EXISTING_CLUSTER", "true")
++	_, err := Load(Options{Kind: true})
++	if err == nil || !strings.Contains(err.Error(), "distinct install profiles") {
++		t.Fatalf("error=%v, want conflicting profiles", err)
++	}
++}
++
++func TestExistingClusterDoesNotFetchCloudCredentials(t *testing.T) {
++	t.Setenv("PATH", t.TempDir())
++	cfg := Config{ExistingCluster: true, ProjectID: "ambient-project", ClusterName: "ambient-cluster", ClusterLocation: "ambient-location", TransferGSAName: "ambient-account"}
++	if err := cfg.EnsureClusterCredentials(t.Context()); err != nil {
++		t.Fatalf("existing cluster tried to fetch credentials: %v", err)
++	}
++	if err := cfg.RequireTransferServiceAccount(); err != nil {
++		t.Fatal(err)
++	}
++	if got := cfg.TransferServiceAccount(); got != "" {
++		t.Fatalf("S3 install inherited transfer account %q", got)
++	}
++}
++
++func TestExistingClusterScriptEnvironment(t *testing.T) {
++	cfg := Config{
++		ExistingCluster: true, ProjectID: "ambient-project",
++		ClusterName: "ambient-cluster", ClusterLocation: "ambient-location",
++		shellEnv: map[string]string{
++			"PROJECT_ID": "ambient-project", "ATE_INSTALL_KIND": "true",
++			"MEMORYSTORE_INSTANCE": "ambient-instance",
++			"SNAPSHOT_TRANSFER_GSA_NAME": "ambient-account",
++		},
++	}
++	env := scriptEnvMap(t, &cfg)
++	if env["ATE_EXISTING_CLUSTER"] != "true" || env["NO_DEV_ENV"] != "true" {
++		t.Fatalf("helper did not receive the existing-cluster profile: %v", env)
++	}
++	for _, name := range []string{"PROJECT_ID", "CLUSTER_NAME", "CLUSTER_LOCATION", "MEMORYSTORE_INSTANCE", "SNAPSHOT_TRANSFER_GSA_NAME", "ATE_INSTALL_KIND"} {
++		if _, present := env[name]; present {
++			t.Errorf("helper inherited %s=%q", name, env[name])
++		}
++	}
++}
++
++func TestSourceRootOutsideCheckout(t *testing.T) {
++	loadEnv(t)
++	root := t.TempDir()
++	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/resources\n"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	t.Setenv(SourceRootEnv, root)
++	outside := t.TempDir()
++	t.Chdir(outside)
++	if err := os.WriteFile("install.yaml", []byte(validHeader+"existingCluster:\n  enabled: true\n"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	cfg, err := LoadFlags(optionsFlagSetForTest(t), LoadOptions{ConfigPath: "install.yaml"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if cfg.Root != root || !cfg.ExistingCluster {
++		t.Fatalf("Root=%q ExistingCluster=%v", cfg.Root, cfg.ExistingCluster)
++	}
++	cwd, err := os.Getwd()
++	if err != nil || cwd != outside {
++		t.Fatalf("working directory changed: %q, %v", cwd, err)
++	}
++}
++
++func TestSourceRootRejectsInvalidOverrides(t *testing.T) {
++	for _, root := range []string{"relative", t.TempDir()} {
++		t.Run(root, func(t *testing.T) {
++			t.Setenv(SourceRootEnv, root)
++			if _, err := RepoRoot(); err == nil || !strings.Contains(err.Error(), SourceRootEnv) {
++				t.Fatalf("error=%v, want explicit source-root error", err)
++			}
++		})
++	}
++}
+diff --git a/cmd/ate-setup/internal/config/load.go b/cmd/ate-setup/internal/config/load.go
+index c9410fa..e64d4cd 100644
+--- a/cmd/ate-setup/internal/config/load.go
++++ b/cmd/ate-setup/internal/config/load.go
+@@ -67,8 +67,9 @@ func LoadFlags(fs *pflag.FlagSet, o LoadOptions) (*Config, error) {
+ 		}
+ 	}
+ 
+-	kind := resolveKind(fs, file, env)
+-	if err := mergeDevEnv(root, env, o.NoDevEnv, kind); err != nil {
++	kind := resolveBoolSetting(fs, file, env, kindEnabledKey)
++	existing := resolveBoolSetting(fs, file, env, "existingCluster.enabled")
++	if err := mergeDevEnv(root, env, o.NoDevEnv, kind || existing); err != nil {
+ 		return nil, err
+ 	}
+ 
+@@ -91,15 +92,11 @@ func configPathFrom(o LoadOptions) string {
+ 	return os.Getenv(ConfigPathEnv)
+ }
+ 
+-// resolveKind answers the Kind question before the dev environment is sourced,
+-// because whether to source it depends on the answer.
+-//
+-// It layers the same channels in the same order Resolve does, off the same
+-// registry entry. Answering it from the flag and the environment alone would
+-// make a document that selects Kind still source .ate-dev-env.sh, pointing a
+-// local install at the GKE project the file names.
+-func resolveKind(fs *pflag.FlagSet, file *File, env map[string]string) bool {
+-	s, ok := Lookup(kindEnabledKey)
++// resolveBoolSetting reads an install-mode switch before the developer
++// environment is sourced. Kind and existing-cluster installs must not source
++// a GKE developer file, whichever channel selected the mode.
++func resolveBoolSetting(fs *pflag.FlagSet, file *File, env map[string]string, key string) bool {
++	s, ok := Lookup(key)
+ 	if !ok {
+ 		return false
+ 	}
+@@ -215,6 +212,7 @@ func buildConfig(root string, env map[string]string, r *Resolved) (*Config, erro
+ 	cfg := &Config{
+ 		Root:              root,
+ 		Kind:              r.Bool("kindCluster.enabled"),
++		ExistingCluster:   r.Bool("existingCluster.enabled"),
+ 		Namespace:         r.String("namespace"),
+ 		Kubeconfig:        kubeconfig,
+ 		Context:           r.String("context"),
+@@ -373,6 +371,12 @@ func namedExplicitly(r *Resolved, key string) bool {
+ // validateResolved rejects invalid and conflicting settings, naming the channel
+ // each value came from so the reader knows which one to edit.
+ func validateResolved(cfg *Config, r *Resolved) error {
++	if cfg.Kind && cfg.ExistingCluster {
++		kind, _ := r.Value(kindEnabledKey)
++		existing, _ := r.Value("existingCluster.enabled")
++		return &ConflictError{A: kind, B: existing, Why: "Kind and an existing non-GKE cluster are distinct install profiles"}
++	}
++
+ 	// The repo/tag pairing is checked here rather than in images.Source.Validate
+ 	// because only here is the channel that supplied each half known. A tag on
+ 	// its own would otherwise be discarded in silence, leaving a build from
+diff --git a/cmd/ate-setup/internal/config/setting.go b/cmd/ate-setup/internal/config/setting.go
+index cb3dfd1..9b4512a 100644
+--- a/cmd/ate-setup/internal/config/setting.go
++++ b/cmd/ate-setup/internal/config/setting.go
+@@ -78,6 +78,10 @@ var Registry = []Setting{
+ 		Key: "kindCluster.enabled", Env: "ATE_INSTALL_KIND", Flag: "kind", Kind: KindBool, Default: "false",
+ 		Usage: "Target a local Kind cluster: kind overlays, the local registry, and host-architecture builds",
+ 	},
++	{
++		Key: "existingCluster.enabled", Env: "ATE_EXISTING_CLUSTER", Flag: "existing-cluster", Kind: KindBool, Default: "false",
++		Usage: "Target an existing non-GKE cluster using kubeconfig and the ate-snapshot-storage S3 Secret; excludes --kind",
++	},
+ 	{
+ 		Key: "kindCluster.name", Env: "KIND_CLUSTER_NAME", Flag: "kind-cluster-name", Kind: KindString, Default: "kind",
+ 		Usage: "Name of the Kind cluster to target",
+diff --git a/cmd/ate-setup/internal/config/shellenv.go b/cmd/ate-setup/internal/config/shellenv.go
+index ff95309..3545131 100644
+--- a/cmd/ate-setup/internal/config/shellenv.go
++++ b/cmd/ate-setup/internal/config/shellenv.go
+@@ -72,10 +72,22 @@ func sourceShellEnv(path, workdir string) (map[string]string, error) {
+ 	return env, nil
+ }
+ 
+-// RepoRoot walks up from the working directory to the module root. This
+-// replaces `git rev-parse --show-toplevel` and works in a source tarball with
+-// no .git directory.
++// SourceRootEnv points packaged installers at their pinned source resources
++// without changing the working directory or the meaning of relative paths.
++const SourceRootEnv = "ATE_SOURCE_ROOT"
++
++// RepoRoot uses the explicit resource root when supplied, otherwise walking
++// up from the working directory as the checkout-based installer always did.
+ func RepoRoot() (string, error) {
++	if root := os.Getenv(SourceRootEnv); root != "" {
++		if !filepath.IsAbs(root) {
++			return "", fmt.Errorf("%s must be an absolute path, got %q", SourceRootEnv, root)
++		}
++		if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
++			return "", fmt.Errorf("%s=%s does not name a source root: %w", SourceRootEnv, root, err)
++		}
++		return root, nil
++	}
+ 	dir, err := os.Getwd()
+ 	if err != nil {
+ 		return "", fmt.Errorf("while resolving the working directory: %w", err)
+diff --git a/cmd/ate-setup/internal/steps/create.go b/cmd/ate-setup/internal/steps/create.go
+index 1d70d08..d5a69c8 100644
+--- a/cmd/ate-setup/internal/steps/create.go
++++ b/cmd/ate-setup/internal/steps/create.go
+@@ -231,7 +231,7 @@ func (e *Env) jwtIssuer(ctx context.Context) string {
+ 	if cfg.ExpectedJWTIssuer != "" {
+ 		return cfg.ExpectedJWTIssuer
+ 	}
+-	if cfg.ProjectID != "" && cfg.ClusterLocation != "" && cfg.ClusterName != "" {
++	if !cfg.ExistingCluster && cfg.ProjectID != "" && cfg.ClusterLocation != "" && cfg.ClusterName != "" {
+ 		return fmt.Sprintf("https://container.googleapis.com/v1/projects/%s/locations/%s/clusters/%s",
+ 			cfg.ProjectID, cfg.ClusterLocation, cfg.ClusterName)
+ 	}
+diff --git a/cmd/ate-setup/internal/steps/delete.go b/cmd/ate-setup/internal/steps/delete.go
+index 3e52e7e..7bf0d6d 100644
+--- a/cmd/ate-setup/internal/steps/delete.go
++++ b/cmd/ate-setup/internal/steps/delete.go
+@@ -48,16 +48,20 @@ func (e *Env) DeleteAteSystem(ctx context.Context) error {
+ 		return err
+ 	}
+ 
+-	if e.Cfg.Kind {
+-		manifest, err := e.Kustomize(installDir + "/kind")
++	if e.Cfg.Kind || e.Cfg.ExistingCluster {
++		overlay := installDir + "/kind"
++		if e.Cfg.ExistingCluster {
++			overlay = SystemOverlay(e.Cfg)
++		}
++		manifest, err := e.Kustomize(overlay)
+ 		if err != nil {
+ 			return err
+ 		}
+ 		if err := e.Kube.DeleteBytes(ctx, manifest); err != nil {
+ 			return err
+ 		}
+-		// Not part of the kind bundle (see its kustomization), so it goes by
+-		// name. The directory delete below covers it on every other install.
++		// Neither profile includes the certificate controller in its bundle.
++		// The directory delete below covers it on the default GKE path.
+ 		if err := e.Kube.DeletePath(ctx, e.Cfg.Manifest("pod-certificate-controller.yaml")); err != nil {
+ 			return err
+ 		}
+diff --git a/cmd/ate-setup/internal/steps/existingcluster_test.go b/cmd/ate-setup/internal/steps/existingcluster_test.go
+new file mode 100644
+index 0000000..28565d1
+--- /dev/null
++++ b/cmd/ate-setup/internal/steps/existingcluster_test.go
+@@ -0,0 +1,202 @@
++// Copyright 2026 Google LLC
++// SPDX-License-Identifier: Apache-2.0
++
++package steps
++
++import (
++	"reflect"
++	"slices"
++	"strings"
++	"testing"
++
++	corev1 "k8s.io/api/core/v1"
++	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
++	"k8s.io/apimachinery/pkg/runtime"
++	"sigs.k8s.io/yaml"
++
++	"go.ate.dev/substrate/cmd/ate-setup/internal/config"
++	"go.ate.dev/substrate/cmd/ate-setup/internal/images"
++	"go.ate.dev/substrate/cmd/ate-setup/internal/kube"
++)
++
++func TestExistingClusterOverlaySelection(t *testing.T) {
++	for _, tc := range []struct {
++		cfg  config.Config
++		want string
++	}{
++		{config.Config{}, "/base"},
++		{config.Config{Kind: true}, "/kind"},
++		{config.Config{Router: config.RouterAgentgateway}, "/agentgateway"},
++		{config.Config{Kind: true, Router: config.RouterAgentgateway}, "/kind-agentgateway"},
++		{config.Config{ExistingCluster: true}, "/existing-cluster"},
++		{config.Config{ExistingCluster: true, Router: config.RouterAgentgateway}, "/existing-cluster-agentgateway"},
++	} {
++		if got := SystemOverlay(&tc.cfg); got != installDir+tc.want {
++			t.Errorf("SystemOverlay(%+v)=%q, want %q", tc.cfg, got, installDir+tc.want)
++		}
++	}
++}
++
++func TestExistingClusterPrebuiltManifests(t *testing.T) {
++	root := repoRoot(t)
++	// A supplied digest is used verbatim by the real prebuilt resolver. No
++	// registry, Go, ko, Docker, kubectl, or external kustomize is needed here.
++	t.Setenv("PATH", t.TempDir())
++	for _, router := range []string{config.RouterEnvoy, config.RouterAgentgateway} {
++		t.Run(router, func(t *testing.T) {
++			e := &Env{Cfg: &config.Config{
++				Root: root, ExistingCluster: true, Router: router,
++				Images: images.Source{Repo: "registry.example.com/substrate", Tag: "v1@sha256:" + strings.Repeat("a", 64)},
++				IngressAllowedSPIFFEIDs: []string{"spiffe://cluster.local/ns/ate-system/sa/ate-client"},
++			}}
++			full, err := e.renderSystemManifests(t.Context())
++			if err != nil {
++				t.Fatal(err)
++			}
++			if strings.Contains(string(full), "ko://") {
++				t.Fatal("unresolved build references remain in prebuilt manifests")
++			}
++			assertExistingClusterManifest(t, full, 2)
++			for _, path := range []string{e.apiServerManifestPath(), e.ateletManifestPath()} {
++				manifest, err := e.renderResolve(t.Context(), path)
++				if err != nil {
++					t.Fatal(err)
++				}
++				assertExistingClusterManifest(t, manifest, 1)
++			}
++			routerManifest, err := e.renderAtenetRouterManifest(t.Context())
++			if err != nil {
++				t.Fatal(err)
++			}
++			assertExistingClusterManifest(t, routerManifest, 0)
++			if got := e.otelConfigPath(); got != e.Cfg.Manifest("existing-cluster", "ate-otel-config.yaml") {
++				t.Errorf("targeted redeploy uses %q", got)
++			}
++		})
++	}
++}
++
++func assertExistingClusterManifest(t *testing.T, manifest []byte, wantPlugins int) {
++	t.Helper()
++	for _, forbidden := range []string{"kind-registry:", "http://rustfs.", "gke-managed-otel", "rustfsadmin", "AGENTGATEWAY_OTLP_ADDRESS"} {
++		if strings.Contains(string(manifest), forbidden) {
++			t.Errorf("portable manifest contains %q", forbidden)
++		}
++	}
++	objects, err := kube.DecodeManifestBytes(manifest)
++	if err != nil {
++		t.Fatal(err)
++	}
++	plugins := 0
++	for _, object := range objects {
++		if object.GetKind() == "ServiceMonitor" || object.GetName() == "rustfs" || object.GetName() == "prometheus" || object.GetName() == "jaeger" {
++			t.Errorf("unexpected development/monitoring resource %s", kube.Describe(object))
++		}
++		pod, found, err := unstructured.NestedMap(object.Object, "spec", "template", "spec")
++		if err != nil {
++			t.Fatal(err)
++		}
++		if !found {
++			continue
++		}
++		var spec corev1.PodSpec
++		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(pod, &spec); err != nil {
++			t.Fatal(err)
++		}
++		for _, volume := range spec.Volumes {
++			if strings.HasPrefix(volume.Name, "image-credential-provider-") {
++				t.Errorf("portable atelet retained cloud node volume %q", volume.Name)
++			}
++		}
++		for _, containers := range [][]corev1.Container{spec.Containers, spec.InitContainers} {
++			for _, container := range containers {
++				hasSecret, hasTelemetry, s3 := false, false, false
++				for _, source := range container.EnvFrom {
++					if source.SecretRef != nil && source.SecretRef.Name == "ate-snapshot-storage" {
++						hasSecret = true
++					}
++					if source.ConfigMapRef != nil && source.ConfigMapRef.Name == "ate-otel-config" {
++						hasTelemetry = true
++					}
++				}
++				if container.Name == "objectstore-plugin" {
++					plugins++
++					for _, env := range container.Env {
++						if env.Name == "ATE_STORAGE_BACKEND" && env.Value == "s3" {
++							s3 = true
++						}
++					}
++					if !hasSecret || !hasTelemetry || !s3 {
++						t.Errorf("object-store sidecar lost S3/secret/shared-config: %+v", container)
++					}
++				} else if hasSecret {
++					t.Errorf("storage credentials leaked to container %q", container.Name)
++				}
++				if container.Name == "atelet" {
++					for _, arg := range container.Args {
++						if strings.HasPrefix(arg, "--image-credential-provider-") || strings.HasPrefix(arg, "--localhost-registry-replacement=") {
++							t.Errorf("portable atelet retained a cloud/local-registry argument %q", arg)
++						}
++					}
++					for _, required := range []string{
++						"--grpc-server-cred-bundle=", "--client-ca-certs=",
++						"--ateapi-ca-file=", "--objectstore-plugin-socket=",
++					} {
++						if !slices.ContainsFunc(container.Args, func(arg string) bool {
++							return strings.HasPrefix(arg, required) && len(arg) > len(required)
++						}) {
++							t.Errorf("portable atelet lacks a nonempty %s argument: %v", required, container.Args)
++						}
++					}
++					for _, mount := range container.VolumeMounts {
++						if strings.HasPrefix(mount.MountPath, "/run/image-credential-provider/") {
++							t.Errorf("portable atelet retained cloud mount %q", mount.MountPath)
++						}
++					}
++				}
++			}
++		}
++	}
++	if plugins != wantPlugins {
++		t.Errorf("patched %d object-store sidecars, want %d", plugins, wantPlugins)
++	}
++}
++
++func TestExistingClusterAgentgatewayPreservesSharedPolicies(t *testing.T) {
++	cfg := config.Config{
++		Root: repoRoot(t), ExistingCluster: true, Router: config.RouterAgentgateway,
++		Images: images.Source{Repo: "registry.example.com/substrate", Tag: "v1@sha256:" + strings.Repeat("a", 64)},
++		IngressAllowedSPIFFEIDs: []string{"spiffe://cluster.local/ns/ate-system/sa/ate-client"},
++	}
++	t.Setenv("PATH", t.TempDir())
++	portableEnv := &Env{Cfg: &cfg}
++	portable, err := portableEnv.renderAtenetRouterManifest(t.Context())
++	if err != nil {
++		t.Fatal(err)
++	}
++	assertExistingClusterManifest(t, portable, 0)
++
++	baselineCfg := cfg
++	baselineCfg.ExistingCluster = false
++	baselineEnv := &Env{Cfg: &baselineCfg}
++	baseline, err := baselineEnv.renderAtenetRouterManifest(t.Context())
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	var got, want map[string]any
++	if err := yaml.Unmarshal([]byte(agentgatewayRouterConfig(t, portable).Data["config.yaml"]), &got); err != nil {
++		t.Fatal(err)
++	}
++	if err := yaml.Unmarshal([]byte(agentgatewayRouterConfig(t, baseline).Data["config.yaml"]), &want); err != nil {
++		t.Fatal(err)
++	}
++	policies, ok := want["frontendPolicies"].(map[string]any)
++	if !ok || policies["tracing"] == nil {
++		t.Fatal("shared gateway config no longer has its optional tracing policy")
++	}
++	delete(policies, "tracing")
++	if !reflect.DeepEqual(got, want) {
++		t.Errorf("portable gateway changed more than its optional tracing policy:\ngot: %+v\nwant: %+v", got, want)
++	}
++}
+diff --git a/cmd/ate-setup/internal/steps/overlay.go b/cmd/ate-setup/internal/steps/overlay.go
+index 2fbaf8c..db65e0c 100644
+--- a/cmd/ate-setup/internal/steps/overlay.go
++++ b/cmd/ate-setup/internal/steps/overlay.go
+@@ -59,6 +59,9 @@ const agentgatewayStaticMTLSComponent = installDir + "/components/agentgateway-s
+ // carries none of them is harmless.
+ func (e *Env) components() []string {
+ 	var components []string
++	if e.Cfg.ExistingCluster {
++		components = append(components, e.Cfg.Path(installDir+"/components/existing-cluster"))
++	}
+ 	// e2e must come before fake-data-plane: e2e appends to atelet's args,
+ 	// and fake-data-plane removes args entirely.
+ 	if e.Cfg.E2ETuning {
+@@ -69,6 +72,9 @@ func (e *Env) components() []string {
+ 	}
+ 	if e.Cfg.Router == config.RouterAgentgateway {
+ 		components = append(components, e.Cfg.Path(agentgatewayStaticMTLSComponent))
++		if e.Cfg.ExistingCluster {
++			components = append(components, e.Cfg.Path(installDir+"/components/existing-cluster-agentgateway"))
++		}
+ 	}
+ 	if e.Cfg.CordonSystemInfraComponents {
+ 		components = append(components, e.Cfg.Path(cordonSystemInfraComponent))
+@@ -78,8 +84,8 @@ func (e *Env) components() []string {
+ 
+ // SystemOverlay picks the kustomization for a full control plane install.
+ //
+-// The choice is a product of two switches: kind vs GKE, and the atenet router
+-// dataplane. The plain GKE envoy install renders the base kustomization rather
++// The choice combines the cluster profile and the atenet router dataplane.
++// The plain GKE envoy install renders the base kustomization rather
+ // than the raw manifests/ate-install directory: the directory would also
+ // re-apply pod-certificate-controller.yaml (reverting the size10 flags and the
+ // WORKERS_PER_SIGNER value set earlier in the install), both atenet-egress
+@@ -87,6 +93,10 @@ func (e *Env) components() []string {
+ // steps.
+ func SystemOverlay(cfg *config.Config) string {
+ 	switch {
++	case cfg.Router == config.RouterAgentgateway && cfg.ExistingCluster:
++		return installDir + "/existing-cluster-agentgateway"
++	case cfg.ExistingCluster:
++		return installDir + "/existing-cluster"
+ 	case cfg.Router == config.RouterAgentgateway && cfg.Kind:
+ 		return installDir + "/kind-agentgateway"
+ 	case cfg.Router == config.RouterAgentgateway:
+@@ -591,6 +601,9 @@ func (e *Env) applyAtenetEgress(ctx context.Context, providers []config.Credenti
+ // right copy themselves: applying the base file on a kind cluster would
+ // overwrite it with the GKE endpoint and break telemetry everywhere at once.
+ func (e *Env) otelConfigPath() string {
++	if e.Cfg.ExistingCluster {
++		return e.Cfg.Manifest("existing-cluster", "ate-otel-config.yaml")
++	}
+ 	if e.Cfg.Kind {
+ 		return e.Cfg.Manifest("kind", "ate-otel-config.yaml")
+ 	}
+diff --git a/cmd/ate-setup/internal/steps/preflight.go b/cmd/ate-setup/internal/steps/preflight.go
+index e1e4082..a7dc600 100644
+--- a/cmd/ate-setup/internal/steps/preflight.go
++++ b/cmd/ate-setup/internal/steps/preflight.go
+@@ -39,6 +39,9 @@ func (e *Env) RequireControlPlane(ctx context.Context) error {
+ 	if e.Cfg.Kind {
+ 		flags += " --kind"
+ 	}
++	if e.Cfg.ExistingCluster {
++		flags += " --existing-cluster"
++	}
+ 	if e.Cfg.Context != "" {
+ 		flags += fmt.Sprintf(" --context=%q", e.Cfg.Context)
+ 	}
+diff --git a/manifests/ate-install/components/existing-cluster-agentgateway/configmap.yaml b/manifests/ate-install/components/existing-cluster-agentgateway/configmap.yaml
+new file mode 100644
+index 0000000..6405644
+--- /dev/null
++++ b/manifests/ate-install/components/existing-cluster-agentgateway/configmap.yaml
+@@ -0,0 +1,118 @@
++# Copyright 2026 The Agent Substrate Authors
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++# Keep equal to agentgateway-static-mtls/configmap.yaml except the optional
++# frontendPolicies.tracing policy. The installer tests compare their policies.
++apiVersion: v1
++kind: ConfigMap
++metadata:
++  name: atenet-router-agentgateway-config
++  namespace: ate-system
++data:
++  config.yaml: |
++    # yaml-language-server: $schema=https://agentgateway.dev/schema/config
++    config:
++      statsAddr: 0.0.0.0:15020
++      backend:
++        # See the ingress-only loopback rationale in ../agentgateway/configmap.yaml.
++        allowDynamicLoopback: true
++
++    frontendPolicies:
++      networkAuthorization:
++        rules:
++        - allow: >-
++            source.spiffeId in [ATE_INGRESS_ALLOWED_SPIFFE_IDS]
++
++    gateways:
++      https:
++        port: 8443
++        protocol: HTTPS
++        tls: &ingress-tls
++          cert: /run/servicedns.podcert.ate.dev/credential-bundle.pem
++          key: /run/servicedns.podcert.ate.dev/credential-bundle.pem
++          root: /run/podidentity.podcert.ate.dev/trust-bundle.pem
++
++    backends:
++    - name: dynamic
++      dynamic: {}
++      policies:
++        http:
++          version: HTTP/1.1
++        backendTunnel:
++          proxy:
++            backend: /dynamic
++          mode: connect
++          policies:
++            backendTLS:
++              cert: /run/podidentity.podcert.ate.dev/credential-bundle.pem
++              key: /run/podidentity.podcert.ate.dev/credential-bundle.pem
++              root: /run/podidentity.podcert.ate.dev/trust-bundle.pem
++              insecureHost: true
++
++    routes:
++    - name: substrate-actors
++      gateways:
++      - https
++      matches:
++      - path:
++          pathPrefix: /
++      policies: &substrate-ingress
++        substrateIngress:
++          host: api.ate-system.svc:443
++          connectTargetPort: 8443
++          policies:
++            backendTLS:
++              cert: /run/podidentity.podcert.ate.dev/credential-bundle.pem
++              key: /run/podidentity.podcert.ate.dev/credential-bundle.pem
++              root: /run/servicedns-ca/trust-bundle.pem
++      backends:
++      - backend: /dynamic
++    - name: substrate-actors-grpc
++      gateways:
++      - https
++      matches: &grpc-matches
++      - method: POST
++        headers:
++        - name: content-type
++          value:
++            regex: '(?i)^application/grpc([+;].*)?$'
++      policies: *substrate-ingress
++      backends: &grpc-backends
++      - backend: /dynamic
++        policies:
++          http:
++            version: HTTP/2.0
++
++    binds:
++    - port: 8444
++      tunnelProtocol: connect
++      listeners:
++      - protocol: HTTPS
++        tls: *ingress-tls
++        routes: []
++    - mode: internal
++      listeners:
++      - protocol: HTTP
++        routes:
++        - name: substrate-actors-tunneled
++          matches:
++          - path:
++              pathPrefix: /
++          policies: *substrate-ingress
++          backends:
++          - backend: /dynamic
++        - name: substrate-actors-tunneled-grpc
++          matches: *grpc-matches
++          policies: *substrate-ingress
++          backends: *grpc-backends
+diff --git a/manifests/ate-install/components/existing-cluster-agentgateway/kustomization.yaml b/manifests/ate-install/components/existing-cluster-agentgateway/kustomization.yaml
+new file mode 100644
+index 0000000..95b7358
+--- /dev/null
++++ b/manifests/ate-install/components/existing-cluster-agentgateway/kustomization.yaml
+@@ -0,0 +1,35 @@
++# Copyright 2026 The Agent Substrate Authors
++# SPDX-License-Identifier: Apache-2.0
++
++apiVersion: kustomize.config.k8s.io/v1alpha1
++kind: Component
++
++# Layer after agentgateway-static-mtls. Preserve its authentication and
++# routing policies without requiring a collector that this profile omits.
++patches:
++  - path: configmap.yaml
++    target:
++      version: v1
++      kind: ConfigMap
++      name: atenet-router-agentgateway-config
++      namespace: ate-system
++  - target:
++      group: apps
++      version: v1
++      kind: Deployment
++      name: atenet-router
++      namespace: ate-system
++    patch: |-
++      apiVersion: apps/v1
++      kind: Deployment
++      metadata:
++        name: atenet-router
++        namespace: ate-system
++      spec:
++        template:
++          spec:
++            containers:
++            - name: agentgateway
++              env:
++              - name: AGENTGATEWAY_OTLP_ADDRESS
++                $patch: delete
+diff --git a/manifests/ate-install/components/existing-cluster/kustomization.yaml b/manifests/ate-install/components/existing-cluster/kustomization.yaml
+new file mode 100644
+index 0000000..674b0b7
+--- /dev/null
++++ b/manifests/ate-install/components/existing-cluster/kustomization.yaml
+@@ -0,0 +1,79 @@
++# Copyright 2026 Google LLC
++# SPDX-License-Identifier: Apache-2.0
++
++apiVersion: kustomize.config.k8s.io/v1alpha1
++kind: Component
++
++# Keep the upstream nonlocal pod shape, replacing only the GKE-specific
++# credential-provider mounts and GCS storage selection. Credentials are read
++# from an operator-created Secret, never supplied as installer flags.
++patches:
++  - target:
++      group: apps
++      version: v1
++      kind: DaemonSet
++      name: atelet
++    patch: |-
++      apiVersion: apps/v1
++      kind: DaemonSet
++      metadata:
++        name: atelet
++        namespace: ate-system
++      spec:
++        template:
++          spec:
++            containers:
++            - name: atelet
++              # Retain generic certificate, drain, and storage arguments,
++              # without GKE's two node credential-provider flags.
++              args:
++              - --grpc-server-cred-bundle=/run/podidentity.podcert.ate.dev/credential-bundle.pem
++              - --client-ca-certs=/run/podidentity.podcert.ate.dev/trust-bundle.pem
++              - --ateapi-ca-file=/run/servicedns.podcert.ate.dev/trust-bundle.pem
++              - --drain-delay=0s
++              - --drain-timeout=5m
++              - --objectstore-plugin-socket=/run/objectstore-plugin/node.sock
++              volumeMounts:
++              - mountPath: /run/image-credential-provider/bin
++                $patch: delete
++              - mountPath: /run/image-credential-provider/config.yaml
++                $patch: delete
++            volumes:
++            - name: image-credential-provider-bin
++              $patch: delete
++            - name: image-credential-provider-config
++              $patch: delete
++            initContainers:
++            - name: objectstore-plugin
++              env:
++              - name: ATE_STORAGE_BACKEND
++                value: s3
++              envFrom:
++              - configMapRef:
++                  name: ate-otel-config
++              - secretRef:
++                  name: ate-snapshot-storage
++  - target:
++      group: apps
++      version: v1
++      kind: Deployment
++      name: ate-api-server
++    patch: |-
++      apiVersion: apps/v1
++      kind: Deployment
++      metadata:
++        name: ate-api-server
++        namespace: ate-system
++      spec:
++        template:
++          spec:
++            initContainers:
++            - name: objectstore-plugin
++              env:
++              - name: ATE_STORAGE_BACKEND
++                value: s3
++              envFrom:
++              - configMapRef:
++                  name: ate-otel-config
++              - secretRef:
++                  name: ate-snapshot-storage
+diff --git a/manifests/ate-install/existing-cluster-agentgateway/kustomization.yaml b/manifests/ate-install/existing-cluster-agentgateway/kustomization.yaml
+new file mode 100644
+index 0000000..757a070
+--- /dev/null
++++ b/manifests/ate-install/existing-cluster-agentgateway/kustomization.yaml
+@@ -0,0 +1,11 @@
++# Copyright 2026 Google LLC
++# SPDX-License-Identifier: Apache-2.0
++
++apiVersion: kustomize.config.k8s.io/v1beta1
++kind: Kustomization
++
++resources:
++  - ../existing-cluster
++
++components:
++  - ../components/agentgateway
+diff --git a/manifests/ate-install/existing-cluster/ate-otel-config.yaml b/manifests/ate-install/existing-cluster/ate-otel-config.yaml
+new file mode 100644
+index 0000000..79f35f1
+--- /dev/null
++++ b/manifests/ate-install/existing-cluster/ate-otel-config.yaml
+@@ -0,0 +1,12 @@
++# Copyright 2026 Google LLC
++# SPDX-License-Identifier: Apache-2.0
++
++# Required by the upstream workloads' envFrom. No collector is installed by
++# this profile. Supply --otlp-endpoint to use an operator-managed collector;
++# otherwise the upstream binaries keep their own exporter defaults.
++apiVersion: v1
++kind: ConfigMap
++metadata:
++  name: ate-otel-config
++  namespace: ate-system
++data: {}
+diff --git a/manifests/ate-install/existing-cluster/kustomization.yaml b/manifests/ate-install/existing-cluster/kustomization.yaml
+new file mode 100644
+index 0000000..0cacbb9
+--- /dev/null
++++ b/manifests/ate-install/existing-cluster/kustomization.yaml
+@@ -0,0 +1,18 @@
++# Copyright 2026 Google LLC
++# SPDX-License-Identifier: Apache-2.0
++
++apiVersion: kustomize.config.k8s.io/v1beta1
++kind: Kustomization
++
++# No local object store, local registry, or monitoring CRDs/controllers.
++# PostgreSQL, sandbox configuration, and pod certificates have their own steps.
++# The installer composes the existing-cluster component on every apply path,
++# including targeted redeploys, instead of only patching this full bundle.
++resources:
++  - ../ate-api-server.yaml
++  - ../ate-idp-server.yaml
++  - ../ate-controller.yaml
++  - ../atelet.yaml
++  - ../atenet-router.yaml
++  - ../ate-system-networkpolicies.yaml
++  - ate-otel-config.yaml
