@@ -1,0 +1,21 @@
+# Render with envsubst, then register with kubectl ate create actor-template.
+# The ate-env namespace, worker pool, API service and access policy must exist.
+metadata:
+  atespace: ate-env
+  name: omp-${TEMPLATE_SUFFIX}
+workerSelector:
+  matchLabels:
+    workload: ate-env
+containers:
+- name: agent
+  image: nix:${OMP_IMAGE}
+  wakeupProbe:
+    httpGet:
+      path: /readyz
+      port: 80
+resources:
+  limits:
+    cpuMillicores: 2000
+    memoryBytes: 4294967296 # 4 GiB; reserve matching worker capacity
+snapshotConfig:
+  preferredFidelity: SNAPSHOT_FIDELITY_MEMORY

@@ -1,0 +1,108 @@
+#!/usr/bin/env expect
+# Run against an already-created OMP environment. Does not send model requests.
+if {$argc != 1} {
+    puts stderr "usage: ATE_ENV_BIN=/path/to/ate-env CUT_WAIT_SECONDS=200 expect examples/omp/smoke.exp <environment-id>"
+    exit 2
+}
+if {![info exists env(CUT_WAIT_SECONDS)] || ![string is integer -strict $env(CUT_WAIT_SECONDS)] || $env(CUT_WAIT_SECONDS) <= 0} {
+    puts stderr "CUT_WAIT_SECONDS must exceed the router timeout under test"
+    exit 2
+}
+set cutWait $env(CUT_WAIT_SECONDS)
+set cli ate-env
+if {[info exists env(ATE_ENV_BIN)]} {
+    set cli $env(ATE_ENV_BIN)
+}
+set id [lindex $argv 0]
+set timeout [expr {$cutWait + 60}]
+
+proc checked_wait {expected} {
+    global spawn_id
+    set result [wait -i $spawn_id]
+    if {[lindex $result 2] != 0 || [lindex $result 3] != $expected || [llength $result] != 4} {
+        error "unexpected process result: $result; expected exit $expected"
+    }
+}
+
+proc expect_line {wanted} {
+    global spawn_id timeout
+    expect {
+        -re {GOT:([^\r\n]*)\r?\n} {
+            if {$expect_out(1,string) ne $wanted} {
+                error "output duplicated or out of order: wanted $wanted, got $expect_out(1,string)"
+            }
+        }
+        timeout { error "timed out waiting for process output" }
+        eof { error "process ended before the next line arrived" }
+    }
+}
+
+spawn -noecho $cli $id shell --timeout 60s {omp --version && omp --smoke-test}
+expect {
+    -re {18\.14\.0} {}
+    timeout { error "OMP version did not arrive" }
+    eof { error "OMP did not report the pinned version" }
+}
+expect {
+    "smoke-test: ok" {}
+    timeout { error "OMP smoke test did not complete" }
+    eof { error "OMP smoke test failed" }
+}
+expect {
+    eof {}
+    timeout { error "OMP smoke process did not exit" }
+}
+checked_wait 0
+
+# The wrapper compares the local terminal before and after ate-env, including
+# the non-zero remote exit path. The remote terminal disables echo so a lost
+# input cannot be mistaken for successfully delivered process output.
+set remoteTimeout "[expr {2 * $cutWait + 120}]s"
+spawn -noecho sh -c {
+    stty rows 40 columns 120 || exit 125
+    before=$(stty -g) || exit 125
+    "$@"
+    status=$?
+    after=$(stty -g) || exit 125
+    if [ "$before" != "$after" ]; then
+        echo TERMINAL_NOT_RESTORED >&2
+        exit 125
+    fi
+    echo TERMINAL_RESTORED
+    exit "$status"
+} sh $cli $id shell --tty --timeout $remoteTimeout {
+    stty -echo
+    test "$(stty size)" = "40 120" || exit 126
+    printf 'READY\n'
+    while IFS= read -r line; do
+        if [ "$line" = finish ]; then exit 7; fi
+        printf 'GOT:%s\n' "$line"
+    done
+}
+expect {
+    "READY" {}
+    timeout { error "PTY did not become ready" }
+    eof { error "PTY ended before becoming ready" }
+}
+send -- "one\r"
+expect_line one
+after [expr {$cutWait * 1000}]
+send -- "two\r"
+expect_line two
+after [expr {$cutWait * 1000}]
+send -- "three\r"
+expect_line three
+send -- "finish\r"
+expect {
+    "TERMINAL_RESTORED" {}
+    "TERMINAL_NOT_RESTORED" { error "ate-env left its terminal in raw mode" }
+    -re {GOT:([^\r\n]*)} { error "unexpected extra process output: $expect_out(1,string)" }
+    timeout { error "PTY did not exit" }
+    eof { error "terminal restoration was not confirmed" }
+}
+expect {
+    eof {}
+    timeout { error "PTY client did not exit" }
+}
+checked_wait 7
+puts "OMP binary and PTY stream-cut smoke passed; no model request was made."

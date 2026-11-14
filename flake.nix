@@ -2,9 +2,10 @@
   description = "Agent Substrate (ate.dev) with Sam Huber's patch stack as a Nix overlay: PTY streams in env, Nix store path images in atelet";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.omp.url = "github:can1357/oh-my-pi/7c49c11aa5bbaf3f418406583096168ad5b8c6dc";
 
   outputs =
-    { self, nixpkgs }:
+    { self, nixpkgs, omp }:
     let
       systems = [
         "x86_64-linux"
@@ -133,6 +134,12 @@
         substrate-installer-tests = (pkgsFor system).ateRegistryFree.installerTests;
         substrate-envoy-module-check = (pkgsFor system).ateRegistryFree.envoy.check;
 
+        # The upstream OMP flake owns its Bun/native-addon toolchain pins.
+        omp = omp.packages.${system}.omp;
+        omp-image = (pkgsFor system).callPackage ./pkgs/omp-image.nix {
+          omp = omp.packages.${system}.omp;
+        };
+
         # Container images of the patched binaries, as `docker load` tarballs.
         atelet-image = (pkgsFor system).ateImages.atelet;
         ateapi-image = (pkgsFor system).ateImages.ateapi;
@@ -148,6 +155,13 @@
         in
         self.packages.${system}
         // {
+          omp-scripts = pkgs.runCommand "ate-nix-omp-scripts"
+            { nativeBuildInputs = [ pkgs.shellcheck ]; }
+            ''
+              bash -n ${./examples/omp/smoke-rootfs.sh}
+              shellcheck --severity=warning ${./examples/omp/smoke-rootfs.sh}
+              touch $out
+            '';
           kind-scripts =
             pkgs.runCommand "ate-nix-kind-scripts"
               {

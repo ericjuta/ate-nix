@@ -10,6 +10,7 @@ pkgs/
   ate-env.nix             env binaries: upstream pin + patches/env
   ate-substrate.nix       atelet, ateapi, installer and plugin: upstream pin + patches/substrate
   ate-nix-image.nix       ateNixImage: builds a Nix image root
+  omp-image.nix           generic OMP actor image with the env guest
   ate-images.nix          container images of atelet and ateapi
   nix-snapshotter/        pinned snapshotter, pause archive, containerd VM check
   registry-free-substrate/ closure-backed pod packages, actor roots and image map
@@ -21,6 +22,7 @@ modules/ate-node.nix      NixOS module for an actor node
 modules/nix-snapshotter.nix optional standalone containerd/kubelet integration
 kind/                     local proof: cluster patch, node setup, checks
 examples/reference/       a project that uses this flake: dev shell, app, two images
+examples/omp/             OMP actor template and terminal smoke
 docs/                     this documentation
 ```
 
@@ -35,6 +37,7 @@ No upstream code is stored here. Each `pkgs/*.nix` file names an upstream commit
 | `go.ate.dev/substrate` inside env | `v1.0.0`, set by `patches/env/0002-substrate-v1.0.0.patch` |
 | Original PTY patch | <https://gist.github.com/SamuelLHuber/5d420731d5d6bbd034daa8f02eae9b96> at revision `a625acf1ae16dcc8015d10fed76cf7bd1a75d010` |
 | nix-snapshotter | `v0.4.0`; source and globset dependency hashes in `pkgs/nix-snapshotter/default.nix` |
+| Oh My Pi | `18.20.2`, commit `7c49c11aa5bbaf3f418406583096168ad5b8c6dc`; upstream flake retains its own toolchain pins |
 | `nixpkgs` | `nixos-unstable`, locked in `flake.lock` |
 
 ## Patches
@@ -50,6 +53,8 @@ No upstream code is stored here. Each `pkgs/*.nix` file names an upstream commit
 | `patches/env/0001-pty-process-streams.patch` | env `56424de` | PTY streams. Samuel Huber's patch, rebased. [pty.md](pty.md) lists the one part that was dropped. |
 | `patches/env/0002-substrate-v1.0.0.patch` | env `56424de` | `go.mod` and `go.sum` only: Substrate v1.0.0. |
 | `patches/env/0003-free-slot-before-exit.patch` | env `56424de` | The guest frees a process slot before it reports the exit. Without it, upstream `TestConcurrencyLimiter` fails on a loaded machine. |
+| `patches/env/0004-router-tls-rotation.patch` | env `56424de` | Reload the router trust bundle and client credentials on TLS handshakes. |
+| `patches/env/0005-resume-cut-process-streams.patch` | env `56424de` + PTY | Resume process output and stdin after router stream cuts. |
 
 ## Update a pin
 
