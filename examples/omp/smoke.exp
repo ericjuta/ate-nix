@@ -39,7 +39,7 @@ proc expect_line {wanted} {
 
 spawn -noecho $cli $id shell --timeout 60s {omp --version && omp --smoke-test}
 expect {
-    -re {18\.14\.0} {}
+    -re {18\.20\.2} {}
     timeout { error "OMP version did not arrive" }
     eof { error "OMP did not report the pinned version" }
 }

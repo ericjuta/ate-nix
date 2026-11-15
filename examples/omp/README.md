@@ -114,4 +114,4 @@ Use the timeout values actually configured on **your** router; 200 is only an ex
 
 For end-to-end provider verification, launch the interactive command above, authenticate, and ask OMP to create and read back a small file under `/workspace`. Confirm the selected model actually answers and the file exists with `ate-env omp-dev shell 'cat <file>'`. This makes a real provider request and may incur cost; the Expect script intentionally does not do it.
 
-Reconnection limitations and certificate rotation are documented in [pty.md](../../docs/pty.md#stream-recovery). None of the new image, stream-cut, certificate-rotation, or model-provider checks are claimed as exercised by this example's documentation.
+Reconnection limitations and certificate rotation are documented in [pty.md](../../docs/pty.md#stream-recovery). [proof.md](../../docs/proof.md#omp-actor-image) records what has run: the image as an actor on a kind cluster, with the non-interactive checks, the Expect script and the terminal UI. A stream cut, certificate rotation and a model request have not been exercised.

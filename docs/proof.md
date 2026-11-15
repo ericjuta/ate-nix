@@ -75,13 +75,23 @@ Proven on `x86_64-linux` on 2026-11-14:
 - `examples/omp/smoke-rootfs.sh` ran the built image in a fresh bubblewrap root with no host authentication/configuration and no network access. OMP reported `18.20.2`, its native `--smoke-test` returned `smoke-test: ok`, and the actual env guest answered `/readyz` after creating its writable workspace/session directories.
 - An Expect-driven terminal rendered first-run provider setup and the main no-model UI, skipped optional setup without signing in, and exited successfully through `/quit`.
 
-This proves the packaged binary/native dependencies, writable guest startup, and terminal rendering. The rootfs smoke exposes the whole read-only host store, so it is not a closure-isolation proof. No provider credentials or model requests were used; OMP inference and this image's deployment behind a Kubernetes router have not been exercised.
+This proves the packaged binary/native dependencies, writable guest startup, and terminal rendering. The rootfs smoke exposes the whole read-only host store, so it is not a closure-isolation proof.
+
+Proven on the kind cluster (`x86_64-linux`, gVisor) on 2026-11-15, with `main` at `72f453b`:
+
+- The template `examples/omp/env-template.yaml.tmpl` with `nix:<.#omp-image>` reached its golden snapshot. The env service ran from the Nix-built `.#ate-env-api-image`.
+- `ate-env create`, then `ate-env <id> shell 'pwd; omp --version; omp --smoke-test'` gave `/workspace`, `omp/18.20.2` and `smoke-test: ok`. The actor saw 158 store paths; the node had 9598.
+- `examples/omp/smoke.exp` passed with `CUT_WAIT_SECONDS=20`: version, native smoke, PTY size 40x120, input after two idle periods in order, remote exit code 7, local terminal restored. 20 seconds is shorter than the router timeouts, so this run did not cut a stream.
+- `ate-env <id> shell --tty omp`, driven by a script through a pseudo-terminal, showed the first-run setup, the main screen with `v18.20.2` and no model, and exited with code 0 through `/quit`.
+- A file in `/workspace` was there after `ate-env suspend` and the next command.
+
+Not proven: a model request (no provider credentials were used), stream recovery after a real router cut, certificate rotation, a person at a real terminal emulator, and ARM.
 
 ## Reference project
 
 - Proven: `nix flake check` passes in `examples/reference` (app tests, both images, the image rules). On the kind cluster, the runtime image booted and served the app. The agent image booted, and a test client of its env guest daemon ran `go test` and `git` in it.
 - Proven: the env service (`ate-env-api`) with the agent image as its template. `ate-env create`, `ate-env <id> shell` and `shell --tty` worked from the Nix-built `ate-env`, and the files in `/work` were there after `ate-env suspend` and the next command. See "PTY streams" above.
-- The `ate-env-api` container image for that test was made by hand from the built binary. The flake output `.#ate-env-api-image` came later: it builds, and it starts and prints its flags under Docker, but it has not run in a cluster.
+- The `ate-env-api` container image for that test was made by hand from the built binary. The flake output `.#ate-env-api-image` came later: it builds, and it ran as the env service in the OMP actor proof above.
 
 ## Review status
 
