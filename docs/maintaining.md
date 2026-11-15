@@ -122,4 +122,4 @@ The best outcome for both patches is that upstream accepts them and this reposit
 
 This repository is Apache-2.0, the same licence as Agent Substrate and env: see [../LICENSE](../LICENSE) and [../NOTICE](../NOTICE). The patches are changes to that upstream code. A contribution that you send is under the same licence.
 
-One point is open. The gist that contains the original PTY patch has no licence statement. `NOTICE` records this.
+The gist that contains the original PTY patch has no licence statement. Its author, Samuel Huber, confirmed that the patch is under Apache-2.0, the same terms as his other contributions to this repository. `NOTICE` records this.
