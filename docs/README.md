@@ -10,7 +10,7 @@ This repository adds four things through patches and packages on top of pinned u
 1. **Nix images.** An agent's filesystem can come from a Nix store path instead of a container image. No registry, no image build, no image pull.
 2. **PTY streams.** `ate-env` can open a real interactive terminal in a remote environment.
 3. **An installer for your own cluster.** Upstream's installer targets Google's GKE or a local test cluster. The patched `ate-setup` also installs on a Kubernetes cluster that you already have.
-4. **Registry-free system pods.** Optional. Substrate's own services and workers can also come from a Nix cache instead of a container registry. Actors keep the interface of item 1. Some container metadata remains internally, and creating the cluster itself is separate.
+4. **Registry-free system pods.** Optional. Substrate's own services and workers can also come from a Nix cache instead of a container registry. This does not change how actors get their images (item 1), and it does not create the Kubernetes cluster for you.
 
 There is also one worked example: the [OMP](https://github.com/can1357/oh-my-pi) coding agent packaged as a Nix image, which you drive through the remote terminal.
 
@@ -41,6 +41,6 @@ This project is not affiliated with Agent Substrate. It is experimental: read [p
 
 1. Read [concepts.md](concepts.md). It takes five minutes.
 2. Build one package with [getting-started.md](getting-started.md). You need Nix, or only Docker.
-3. Run the local proof in [../kind/README.md](../kind/README.md). Its first lines list the tools that you need.
+3. Run the local proof in [../kind/README.md](../kind/README.md). Its first lines list the tools that you need. A full run took about 20 minutes.
 
 You can stop after any step. Steps 1 and 2 need no cluster.

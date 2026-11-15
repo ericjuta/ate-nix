@@ -1,7 +1,11 @@
 # Proof on kind
 
 Starts an actor from a Nix store path on a throwaway local cluster, using upstream's own kind flow.
-Needs Docker, Go, `kubectl`, `envsubst` and `curl`. No Nix on the host: Nix runs in a container and its store lives in a Docker volume that the kind node mounts as `/nix`.
+Needs Docker, Go, `kubectl`, `git`, `envsubst` and `curl`. You do not need to install `kind`: the upstream scripts bring their own (`hack/kind.sh`). No Nix on the host: Nix runs in a container and its store lives in a Docker volume that the kind node mounts as `/nix`.
+
+Time: a fresh clone to a clean teardown took about 20 minutes on an 8-core machine on 2026-11-15, with the Docker base images and the Go module cache already on the machine. Allow more the very first time. Steps 1 and 2 are nearly all of it.
+
+The steps use two directories: this repository (`$ATE_NIX`) and a checkout of upstream Substrate (`$SUBSTRATE`). Each step says where to run. Use one shell for all steps, because later steps use the variables of earlier ones.
 
 All `nix` commands below run as:
 
@@ -15,38 +19,59 @@ nixc() { docker run --rm -v ate-nix-store:/nix -v "$PWD:/src" -w /src nixos/nix:
 In this repository. The first run fills the `ate-nix-store` volume with the image's Nix installation.
 
 ```sh
-nixc build --no-link --print-out-paths .#proof-image .#atelet-image .#ateapi-image
+export ATE_NIX="$PWD" OUT=/tmp/ate-nix-out
+mkdir -p "$OUT"
+nixc build --no-link --print-out-paths .#proof-image .#atelet-image .#ateapi-image | tee "$OUT/paths"
 ```
 
-Copy the two image tarballs out of the volume (`docker run -v ate-nix-store:/nix -v /tmp/out:/out busybox cp -L <path> /out/`). Keep the `ate-proof-image` path for step 5.
+The command prints three store paths. The results are in the volume, not on your disk. Copy the two container image tarballs out, and keep the path of the proof image for step 5:
+
+```sh
+for p in $(grep -e '-atelet.tar.gz$' -e '-ateapi.tar.gz$' "$OUT/paths"); do
+  docker run --rm --user "$(id -u)" -v ate-nix-store:/nix -v "$OUT:/out" busybox cp -L "$p" /out/
+done
+export PROOF_IMAGE="$(grep -e '-ate-proof-image$' "$OUT/paths")"
+ls "$OUT"; echo "$PROOF_IMAGE"
+```
 
 ## 2. Cluster
 
-In a checkout of `agent-substrate/substrate` at `v1.0.0`:
+Get upstream Substrate at `v1.0.0` and work in that checkout:
 
 ```sh
-git apply /path/to/ate-nix/kind/create-kind-cluster.patch   # mounts the volume into the node as /nix
+export SUBSTRATE=/tmp/ate-nix-substrate
+git clone --branch v1.0.0 --depth 1 https://github.com/agent-substrate/substrate "$SUBSTRATE"
+cd "$SUBSTRATE"
+git apply "$ATE_NIX/kind/create-kind-cluster.patch"   # mounts the volume into the node as /nix
 export KIND_CLUSTER_NAME=ate-nix ATE_INSTALL_KIND=true BUILDX_BUILDER=default
 hack/create-kind-cluster.sh
 go run ./cmd/ate-setup deploy ate-system --credential-provider='{"name":"k8s.io"}' \
   --ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/ate-system/sa/atenet-client
 go run ./cmd/ate-setup deploy demo counter      # OCI baseline, and a worker image to reuse
-go build -o ~/bin/kubectl-ate ./cmd/kubectl-ate
+mkdir -p "$OUT/bin" && go build -o "$OUT/bin/kubectl-ate" ./cmd/kubectl-ate
+export PATH="$OUT/bin:$PATH"                    # kubectl finds the plugin as `kubectl ate`
 ```
+
+The install builds Substrate's own container images, so it is the slow part. The two flags on `deploy ate-system` are what upstream's kind flow uses: they are not specific to this repository.
 
 `BUILDX_BUILDER=default` matters when your default buildx builder is a `docker-container` one: it cannot reach the registry on `localhost:5001`.
 
 ## 3. Node
 
+From here on, work in this repository again. This step configures the Nix daemon and the mounts inside the kind node:
+
 ```sh
+cd "$ATE_NIX"
 docker exec -i ate-nix-control-plane sh < kind/node-setup.sh
 ```
 
 ## 4. Patched atelet and ateapi
 
+In this repository. Load the two tarballs of step 1 into the kind node, then switch the two components to them. The upstream `hack/kind.sh` works only from its own checkout, so the two load lines change directory for one command each:
+
 ```sh
-hack/kind.sh load image-archive atelet-image.tar.gz --name ate-nix     # from the substrate checkout
-hack/kind.sh load image-archive ateapi-image.tar.gz --name ate-nix
+(cd "$SUBSTRATE" && hack/kind.sh load image-archive "$OUT"/*-atelet.tar.gz --name ate-nix)
+(cd "$SUBSTRATE" && hack/kind.sh load image-archive "$OUT"/*-ateapi.tar.gz --name ate-nix)
 k() { kubectl --context kind-ate-nix -n ate-system "$@"; }
 k patch ds atelet --type=json --patch-file kind/atelet-nix.patch.json
 k set image ds/atelet atelet=docker.io/ate-nix/atelet:1.0.0
@@ -56,8 +81,9 @@ k rollout status ds/atelet && k rollout status deploy/ate-api-server
 
 ## 5. Prove
 
+In this repository. `PROOF_IMAGE` is set since step 1.
+
 ```sh
-export PROOF_IMAGE=/nix/store/...-ate-proof-image
 export WORKER_IMAGE=$(kubectl --context kind-ate-nix -n ate-demo-counter get workerpool counter -o jsonpath='{.spec.workerImage}')
 kind/prove.sh
 ```
@@ -75,7 +101,9 @@ kind/prove.sh
 PASS
 ```
 
-To see substitution, create a template whose image is a nixpkgs path the node does not have, for example `nixc eval --raw --inputs-from . nixpkgs#darkhttpd.outPath` with `command: ["/bin/darkhttpd", "/bin", "--port", "80"]`.
+The hash, the number of node paths and the counter values differ from run to run. `PASS` on the last line is the result.
+
+Optional, and not scripted: to see substitution, create a template whose image is a nixpkgs path the node does not have, for example `nixc eval --raw --inputs-from . nixpkgs#darkhttpd.outPath` with `command: ["/bin/darkhttpd", "/bin", "--port", "80"]`.
 
 ## 6. Private signed cache
 
@@ -83,7 +111,7 @@ To see substitution, create a template whose image is a nixpkgs path the node do
 kind/private-cache.sh      # same WORKER_IMAGE as step 5
 ```
 
-Builds three images no public cache has and serves them from a local binary cache (container `ate-nix-cache` on the `kind` network): one signed with a new key, one unsigned, one signed with a second key. It also asks for a store path that no cache has, and checks that each refused template's error says why. It adds the cache and the first key to the node with `kind/node-setup.sh`, which is how you point a real node at your own cache:
+Builds three images no public cache has and serves them from a local binary cache (container `ate-nix-cache` on the `kind` network): one signed with a new key, one unsigned, one signed with a second key. It also asks for a store path that no cache has, and checks that each refused template's error says why. It adds the cache and the first key to the node with `kind/node-setup.sh`. You do not run the next block here: it shows how you point a real node at your own cache with the same script.
 
 ```sh
 SUBSTITUTERS="https://cache.nixos.org https://cache.example.com" \
@@ -117,7 +145,11 @@ The last block is revocation. The script takes the first key away from the node.
 ## Teardown
 
 ```sh
-KIND_CLUSTER_NAME=ate-nix hack/delete-kind-cluster.sh
+(cd "$SUBSTRATE" && KIND_CLUSTER_NAME=ate-nix hack/delete-kind-cluster.sh)
 docker rm -f ate-nix-cache
 docker volume rm ate-nix-store ate-nix-cache
+rm -rf "$OUT" "$SUBSTRATE"
 ```
+
+If `docker volume rm` says that `ate-nix-store` is in use, a stopped container still holds it: `docker ps -a --filter volume=ate-nix-store` shows it, and `docker rm <id>` removes it.
+The upstream install also leaves an image tag `localhost:5001/envoy-dataplane:build-<number>` in your local Docker. `docker image ls 'localhost:5001/*'` shows it.

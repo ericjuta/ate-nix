@@ -11,6 +11,7 @@ The upstream documentation is at <https://ate.dev/docs/>.
 
 | Term | Meaning |
 | --- | --- |
+| **Snapshot** | The saved state of a stopped workload: its memory and its files. Substrate keeps snapshots in object storage (an S3 or GCS bucket). |
 | **Actor** | One running, stateful workload: one agent, one environment. Substrate can suspend it to a snapshot and resume it later, with its memory and files intact. |
 | **Actor template** | The recipe for an actor: which image, which command, how much CPU and memory. Many actors start from one template. A template cannot be changed after it is created. |
 | **Golden snapshot** | The snapshot Substrate takes when it starts a template for the first time. New actors start from this snapshot, which is why they start fast. A template with a golden snapshot has proven that its image boots. |
@@ -39,7 +40,7 @@ The name alone does not prove what the files contain. That proof is the signatur
 | **Closure** | A store path plus every store path it needs to run, and nothing else. The closure of `bash` is `bash` and its C library, not the whole store. |
 | **Binary cache** | An HTTP server that holds built store paths. Any static file server works. The public one for the Nix package set is `cache.nixos.org`. |
 | **Substitute** | To download a built store path from a binary cache instead of building it. A cache is also called a **substituter**. |
-| **Signature** | Each path in a binary cache can carry a signature made with the cache's private key. A machine lists the public keys that it trusts. With `require-sigs` on, the machine refuses a path that no trusted key signed. |
+| **Signature** | Each path in a binary cache can carry a signature made with the cache's private key. A machine lists the public keys that it trusts. With the setting `require-sigs` on in the machine's Nix configuration (`nix.conf`), the machine refuses a path that no trusted key signed. |
 | **Nix daemon** | The service on a machine that owns `/nix/store`. Other programs ask it to substitute paths. |
 | **GC root** | A marker that tells the Nix garbage collector "keep this path and its closure". |
 | **Flake** | A Nix project with a `flake.nix` file that lists its inputs (pinned) and outputs (packages, modules). This repository is a flake. |
@@ -71,7 +72,7 @@ A **view** is the directory that atelet builds for one Nix image. It contains ha
 
 **PTY streams** are independent of Nix images. A PTY (pseudo-terminal) is what makes a remote shell behave like a local one: full-screen programs, colours, window resize. Upstream `ate-env` runs a command and returns its output. With the patch, it can also attach your terminal to the remote command. See [pty.md](pty.md).
 
-**Pod images** are a separate, optional feature. An actor is not a Kubernetes pod, but Substrate's own services and workers are, and normally they come from a container registry too. The paragraph below says how they can come from a Nix cache instead. Kubernetes starts Substrate's own services and
+**Pod images** are a separate, optional feature. An actor is not a Kubernetes pod, but Substrate's own services and workers are, and normally they come from a container registry too. They can come from a Nix cache instead. The rest of this paragraph is for operators who want that. Kubernetes starts Substrate's own services and
 workers through containerd; actors are started by atelet. The optional
 nix-snapshotter module lets containerd realize signed closures from a Nix cache
 using `nix:0...` archive references. These archives retain OCI image configuration
@@ -95,6 +96,8 @@ These are not needed for the short path. Come back when a page uses one.
 | **nix-snapshotter** | A containerd plugin from another project. With it, containerd can start a pod from a Nix closure instead of image layers. This repository uses it only for the registry-free system pods. |
 | **nix-csi** | A different project with a similar aim: it gives a pod a Nix closure as a volume. This repository does not use it. [nix-images.md](nix-images.md#why-nix-snapshotter-rather-than-nix-csi) compares the two. |
 | **Image map** | A file for the installer that says, for each Substrate component, which image reference to deploy. The registry-free path generates one that points at Nix closures. |
+| **ate-setup**, **kubectl-ate** | The Substrate installer, and the `kubectl` plugin that manages templates and actors (`kubectl ate ...`). Both are upstream programs. This repository builds patched versions of them. |
+| **System pods** | Substrate's own services on the cluster (API server, controller, router, atelet), as opposed to the actors that it runs for you. |
 | **OMP** | [Oh My Pi](https://github.com/can1357/oh-my-pi), an open-source coding agent that runs in a terminal. This repository packages it as an example of a real agent in a Nix image. |
 
 ## How the repository is built

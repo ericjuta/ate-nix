@@ -98,11 +98,15 @@ changes, so skip the image replacement if you installed that release.
 | `atelet` | Builds the views. |
 | `ateapi` | Accepts `nix:` references. The upstream one rejects them. |
 
-Build the images and load them into your registry:
+Build the images, then push them to a registry that your nodes can pull from:
 
 ```sh
 nix build .#atelet-image && docker load < result    # ate-nix/atelet:1.0.0
 nix build .#ateapi-image && docker load < result    # ate-nix/ateapi:1.0.0
+for i in atelet ateapi; do
+  docker tag ate-nix/$i:1.0.0 <registry>/ate-nix/$i:1.0.0
+  docker push <registry>/ate-nix/$i:1.0.0
+done
 ```
 
 The images use the same layout as the upstream images (`/ko-app/<name>`), so only the image reference changes:

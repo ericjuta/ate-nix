@@ -59,8 +59,12 @@ nixc build --no-link --print-out-paths .#ate-env .#ate-substrate
 The command prints the store paths of the results. They are in the volume, not on your disk. To copy a file to the host:
 
 ```sh
-docker run --rm -v ate-nix-store:/nix -v "$PWD/out:/out" busybox cp -L <store path>/bin/ate-env /out/
+mkdir -p /tmp/ate-nix-bin
+docker run --rm --user "$(id -u)" -v ate-nix-store:/nix -v /tmp/ate-nix-bin:/out busybox cp -L <store path>/bin/ate-env /out/
+/tmp/ate-nix-bin/ate-env --help
 ```
+
+Use the store path that ends in `-ate-env-...`. The programs are statically linked, so the copy runs on any Linux host of the same architecture.
 
 ## What you can build
 
