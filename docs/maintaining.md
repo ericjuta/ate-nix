@@ -52,7 +52,7 @@ No upstream code is stored here. Each `pkgs/*.nix` file names an upstream commit
 | `patches/nix-snapshotter/nix-snapshotter-builder-error-output.patch` | nix-snapshotter v0.4.0 | Bounded substitution diagnostics returned to CRI callers. |
 | `patches/env/0001-pty-process-streams.patch` | env `56424de` | PTY streams. Samuel Huber's patch, rebased. [pty.md](pty.md) lists the one part that was dropped. |
 | `patches/env/0002-substrate-v1.0.0.patch` | env `56424de` | `go.mod` and `go.sum` only: Substrate v1.0.0. |
-| `patches/env/0003-free-slot-before-exit.patch` | env `56424de` | The guest frees a process slot before it reports the exit. Without it, upstream `TestConcurrencyLimiter` fails on a loaded machine. |
+| `patches/env/0003-free-slot-before-exit.patch` | env `56424de` | The guest frees a process slot before it reports the exit. Without it, upstream `TestConcurrencyLimiter` fails on a loaded machine. Proposed upstream as [agent-substrate/env#127](https://github.com/agent-substrate/env/pull/127); drop the patch when a pin includes it. |
 | `patches/env/0004-router-tls-rotation.patch` | env `56424de` | Reload the router trust bundle and client credentials on TLS handshakes. |
 | `patches/env/0005-resume-cut-process-streams.patch` | env `56424de` + PTY | Resume process output and stdin after router stream cuts. |
 
