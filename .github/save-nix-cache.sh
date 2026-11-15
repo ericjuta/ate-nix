@@ -1,18 +1,15 @@
 #!/usr/bin/env bash
-# Copies every store path that this machine built itself into a file binary
-# cache at $1, which CI saves between runs. Paths signed by cache.nixos.org
-# are left out: the next run downloads them again from there.
+# Fills a file binary cache at $1, which CI saves between runs, with every
+# store path that this run built itself or took from the previous archive.
+# Paths signed by cache.nixos.org are left out: the next run downloads them
+# again from there. The archive starts empty each time, so it holds nothing
+# from old pins.
 set -euo pipefail
 
 cache=$1
 store=file://$cache
+rm -rf "$cache"
 mkdir -p "$cache"
-
-# Start again when the cache holds too much from old pins.
-if [ "$(du -s --block-size=1M "$cache" | cut -f1)" -gt 4000 ]; then
-  rm -rf "$cache"
-  mkdir -p "$cache"
-fi
 
 all=$(mktemp)
 nix path-info --all --sigs | tr '\t' ' ' >"$all"
@@ -26,8 +23,7 @@ stubs=$(mktemp -d)
 (cd "$stubs" && xargs -r -P 16 -I{} curl -fsS --retry 3 -o {}.narinfo https://cache.nixos.org/{}.narinfo) <"$all.upstream"
 for stub in "$stubs"/*.narinfo; do
   [ -e "$stub" ] || continue
-  name=$(basename "$stub")
-  if [ -e "$cache/$name" ]; then rm "$stub"; else cp "$stub" "$cache/$name"; fi
+  cp "$stub" "$cache/"
 done
 
 xargs -r nix copy --no-recursive --to "$store?compression=zstd" <"$all.built"

@@ -108,6 +108,7 @@ nix flake check -L
 
 The first command builds every check of the flake for your system: both packages with their Go tests, all images, ShellCheck on the `kind/` scripts, and an evaluation of the NixOS module. The second does the same for the reference project.
 CI (`.github/workflows/ci.yml`) runs both on each pull request, on `x86_64-linux` and `aarch64-linux`. Linux checks also include image-map validation, an Envoy dynamic-module check, and a disposable NixOS VM with standalone containerd. That VM is not a complete Substrate/Kubernetes cluster. The VM check (`registry-free-node`) needs KVM, which the hosted ARM runner does not have, so CI runs it on `x86_64-linux` only. CI also removes unused toolchains from the runner and adds swap, because the collector and Jaeger builds need more disk and memory than a hosted runner has free.
+CI keeps what it builds in the repository's GitHub Actions cache, one archive for each system (`.github/save-nix-cache.sh`). A run that changes no Nix file, lock file or patch takes about 5 to 10 minutes. A run that changes one of them compiles what changed and can take up to two hours.
 
 - A change to the substrate patch needs the local proof (`kind/prove.sh`, `kind/private-cache.sh`). If you did not run it, say so.
 - Update [proof.md](proof.md) only with results that you saw. Put all other items in "Not proven".
