@@ -59,15 +59,18 @@ jobs:
           df -h
           free -g
           nproc
-      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
-      # Keeps what this job builds in the repository's GitHub Actions cache, so
-      # a later run compiles only what changed. No secret and no outside
-      # service: FlakeHub and the usage report are off.
-      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+      # A binary cache of what earlier runs built, kept as one archive in the
+      # repository's GitHub Actions cache, so a run compiles only what changed.
+      # A new archive is saved when a Nix file, lock file or patch changes.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          use-gha-cache: enabled
-          use-flakehub: disabled
-          diagnostic-endpoint: ""
+          path: ~/nix-cache
+          key: nix-cache-${{ matrix.system }}-${{ hashFiles('**/*.nix', '**/flake.lock', 'patches/**') }}
+          restore-keys: nix-cache-${{ matrix.system }}-
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+        with:
+          extra_nix_config: |
+            extra-substituters = file:///home/runner/nix-cache?trusted=1
       # Builds every check for this system: applies each patch to its pinned
       # upstream source, compiles, runs the Go tests that the packages enable,
       # builds the images, lints the kind scripts and evaluates the NixOS module.
@@ -90,3 +93,5 @@ jobs:
         run: nix flake check -L
       - name: Build the private-cache proof images
         run: nix build -L --impure --file kind/private-images.nix --argstr nonce ci signed unsigned rogue
+      - name: Copy what this run built into the cache
+        run: .github/save-nix-cache.sh ~/nix-cache
