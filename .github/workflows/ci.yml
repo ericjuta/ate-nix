@@ -60,6 +60,14 @@ jobs:
           free -g
           nproc
       - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+      # Keeps what this job builds in the repository's GitHub Actions cache, so
+      # a later run compiles only what changed. No secret and no outside
+      # service: FlakeHub and the usage report are off.
+      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          use-gha-cache: enabled
+          use-flakehub: disabled
+          diagnostic-endpoint: ""
       # Builds every check for this system: applies each patch to its pinned
       # upstream source, compiles, runs the Go tests that the packages enable,
       # builds the images, lints the kind scripts and evaluates the NixOS module.
