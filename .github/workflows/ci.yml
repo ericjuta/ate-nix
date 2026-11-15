@@ -94,4 +94,7 @@ jobs:
       - name: Build the private-cache proof images
         run: nix build -L --impure --file kind/private-images.nix --argstr nonce ci signed unsigned rogue
       - name: Copy what this run built into the cache
-        run: .github/save-nix-cache.sh ~/nix-cache
+        run: |
+          # The Nix daemon creates the directory as root when no archive was restored.
+          sudo chown -R "$(id -u)" ~/nix-cache
+          .github/save-nix-cache.sh ~/nix-cache
