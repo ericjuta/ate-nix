@@ -42,6 +42,21 @@ nix build .#ate-env && ./result/bin/ate-env --help
 No Nix on your machine? [docs/getting-started.md](docs/getting-started.md) shows the same build with only Docker.
 To see an actor boot from a store path on a local throwaway cluster, follow [kind/README.md](kind/README.md).
 
+
+### Run OMP in an actor
+
+The Linux `omp-image` output combines pinned upstream [Oh My Pi](https://github.com/can1357/oh-my-pi)
+with the patched env guest and a writable workspace:
+
+```sh
+nix build .#omp-image
+```
+
+Publish its signed closure to your binary cache, use the resulting
+`nix:/nix/store/...` reference in an env actor template, and connect with
+`ate-env <id> shell --tty omp`. The image contains no provider credentials
+or organization configuration. See [examples/omp](examples/omp) for setup.
+
 ### Install outside GKE
 
 `ate-substrate` also supplies `ate-setup` and `kubectl-ate`. The installer

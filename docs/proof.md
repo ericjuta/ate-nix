@@ -63,7 +63,19 @@ This is a signed-substitution/containerd runtime proof, not a complete fresh Sub
 
 - Proven: the Go tests of the patched env packages pass, the package builds, and the new flags are in `ate-env --help`.
 - Proven on the kind cluster, with the env service in front of the reference project's agent image (a Nix image): a scripted session with `ate-env <id> shell --tty sh`. The remote side was a real terminal (`/dev/pts/0`) with the size of the local one (40x120), and it followed a resize to 30x100. `go test` ran in the session. Ctrl-C reached the remote shell and did not end it. `exit 3` returned exit code 3, and the local terminal had its first settings again afterwards. [../examples/reference/README.md](../examples/reference/README.md) has the steps.
+- Proven on Linux on 2026-11-14: a throwaway smoke launched the built `ate-env` executable through a real local PTY against the real env API and guest, with a fake Substrate control plane and router. Both route-timeout and idle-timeout cuts at 300 ms preserved input sent after 1.2 seconds idle. The remote side reported `/dev/pts/1` and 40x120; both input lines returned, remote exit code 3 propagated, and the local terminal settings were restored. This is a transport/CLI smoke, not a Kubernetes deployment or model-inference proof.
 - Not proven: `--suspend-on-osc-7501-inactive` against a cluster. A person at a real terminal emulator: the session above was driven by a script through a pseudo-terminal.
+
+
+## OMP actor image
+
+Proven on `x86_64-linux` on 2026-11-14:
+
+- The isolated OMP change passed all 43 root flake checks and all 11 reference-project checks.
+- `examples/omp/smoke-rootfs.sh` ran the built image in a fresh bubblewrap root with no host authentication/configuration and no network access. OMP reported `18.20.2`, its native `--smoke-test` returned `smoke-test: ok`, and the actual env guest answered `/readyz` after creating its writable workspace/session directories.
+- An Expect-driven terminal rendered first-run provider setup and the main no-model UI, skipped optional setup without signing in, and exited successfully through `/quit`.
+
+This proves the packaged binary/native dependencies, writable guest startup, and terminal rendering. The rootfs smoke exposes the whole read-only host store, so it is not a closure-isolation proof. No provider credentials or model requests were used; OMP inference and this image's deployment behind a Kubernetes router have not been exercised.
 
 ## Reference project
 

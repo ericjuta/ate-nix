@@ -1,0 +1,915 @@
+Resume interrupted process streams for agent-substrate/env.
+
+Ported from Samuel Huber's environment reliability patches. Applies to env
+56424de763f91daa6b6c38f6249bacef1d82e5e1 after patches 0001 through 0004.
+
+Reopen output at delivered byte offsets after router route/idle timeouts or
+transient stream cuts. Reopen stdin on the next write, and propagate an
+upstream input-stream cut immediately from the API. Reconnect probes and
+repeated failures without progress are bounded. Regression tests exercise
+both route-timeout and idle-timeout responses. Guest tests use isolated
+spool directories instead of deleting another package's shared test spool.
+
+Rebased over ate-nix's PTY terminal-restoration fix: retain exitCodeError and
+its tests. Follow consumes output through the exit message before returning,
+so the earlier separate Wait/output-drain loop and timer are no longer needed.
+
+diff --git a/clients/go/client_test.go b/clients/go/client_test.go
+index bbf7650..d0a2428 100644
+--- a/clients/go/client_test.go
++++ b/clients/go/client_test.go
+@@ -47,6 +47,13 @@ type fixture struct {
+ }
+ 
+ func newFixture(t *testing.T) *fixture {
++	t.Helper()
++	return newFixtureWithRouter(t, func(*fakerouter.Router) {})
++}
++
++// newFixtureWithRouter is newFixture with the fake router adjusted by
++// configure before it serves.
++func newFixtureWithRouter(t *testing.T, configure func(*fakerouter.Router)) *fixture {
+ 	t.Helper()
+ 	t.Chdir(t.TempDir())
+ 
+@@ -61,6 +68,7 @@ func newFixture(t *testing.T) *fixture {
+ 	router.Running = func(id string) bool {
+ 		return control.Status(id) == ateapipb.ActorState_ACTOR_STATE_RUNNING
+ 	}
++	configure(router)
+ 	routerAddr, stopRouter := router.Serve()
+ 	t.Cleanup(stopRouter)
+ 
+@@ -372,6 +380,108 @@ func TestProcessInteractiveStdinAndOutput(t *testing.T) {
+ 	}
+ }
+ 
++// A process outlives any one request: the router cuts every stream, and the
++// client resumes output at the delivered offsets and stdin on the next write.
++// Input written after the streams sat idle through several cuts must arrive,
++// and output must arrive exactly once. Envoy reports a cut differently for
++// its route timeout and its stream idle timeout; both must resume.
++func TestProcessStreamsSurviveRouterCuts(t *testing.T) {
++	for name, idle := range map[string]bool{"route timeout": false, "stream idle timeout": true} {
++		t.Run(name, func(t *testing.T) {
++			testProcessStreamsSurviveCuts(t, idle)
++		})
++	}
++}
++
++func testProcessStreamsSurviveCuts(t *testing.T, cutAsIdleTimeout bool) {
++	const routeTimeout = 300 * time.Millisecond
++	f := newFixtureWithRouter(t, func(r *fakerouter.Router) {
++		r.RouteTimeout = routeTimeout
++		r.CutAsIdleTimeout = cutAsIdleTimeout
++	})
++	sb := f.create(t, "sb-cut")
++	ctx := t.Context()
++
++	proc, err := sb.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{Command: []string{"cat"}, Stdin: true})
++	if err != nil {
++		t.Fatal(err)
++	}
++	type followed struct {
++		exit *ateenvv1alpha.Process
++		err  error
++	}
++	lines := make(chan string, 8)
++	done := make(chan followed, 1)
++	go func() {
++		var partial string
++		exit, err := proc.Follow(ctx, func(msg *ateenvv1alpha.ProcessOutput) error {
++			partial += string(msg.GetStdout())
++			for {
++				line, rest, ok := strings.Cut(partial, "\n")
++				if !ok {
++					return nil
++				}
++				lines <- line
++				partial = rest
++			}
++		})
++		done <- followed{exit, err}
++	}()
++	expectLine := func(want string) {
++		t.Helper()
++		select {
++		case got := <-lines:
++			if got != want {
++				t.Fatalf("output line = %q, want %q", got, want)
++			}
++		case r := <-done:
++			t.Fatalf("follow ended before %q: exit=%v err=%v", want, r.exit, r.err)
++		case <-time.After(10 * time.Second):
++			t.Fatalf("no output line %q", want)
++		}
++	}
++
++	stdin, err := proc.Stdin(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, line := range []string{"one", "two", "three"} {
++		if _, err := stdin.Write([]byte(line + "\n")); err != nil {
++			t.Fatalf("writing %q: %v", line, err)
++		}
++		expectLine(line)
++		time.Sleep(3 * routeTimeout) // both streams idle across several cuts
++	}
++	if err := stdin.Close(); err != nil {
++		t.Fatal(err)
++	}
++
++	select {
++	case r := <-done:
++		if r.err != nil {
++			t.Fatalf("follow: %v", r.err)
++		}
++		if r.exit.GetState() != ateenvv1alpha.ProcessState_PROCESS_STATE_EXITED || r.exit.GetExitCode() != 0 {
++			t.Errorf("exit = %v, want exited with 0", r.exit)
++		}
++	case <-time.After(10 * time.Second):
++		t.Fatal("follow did not end after stdin closed")
++	}
++	select {
++	case extra := <-lines:
++		t.Errorf("output delivered more than once: extra line %q", extra)
++	default:
++	}
++
++	res, err := sb.Run(ctx, env.ShellRequest{Command: "echo start; sleep 1; echo done"})
++	if err != nil {
++		t.Fatalf("run outlasting the route timeout: %v", err)
++	}
++	if res.Stdout != "start\ndone\n" || res.ExitCode != 0 {
++		t.Errorf("run result = %+v, want stdout %q", res, "start\ndone\n")
++	}
++}
++
+ func TestProcessSignalAndKill(t *testing.T) {
+ 	f := newFixture(t)
+ 	sb := f.create(t, "sb-sig")
+diff --git a/clients/go/env.go b/clients/go/env.go
+index a1c24e2..e9ae0f4 100644
+--- a/clients/go/env.go
++++ b/clients/go/env.go
+@@ -88,32 +88,15 @@ func (e *Env) Run(ctx context.Context, req ShellRequest) (*ShellResponse, error)
+ 		}
+ 	}
+ 
+-	stream, err := proc.Output(ctx, &ateenvv1alpha.StreamProcessOutputRequest{Follow: true})
++	var stdoutBuf, stderrBuf bytes.Buffer
++	exit, err := proc.Follow(ctx, func(msg *ateenvv1alpha.ProcessOutput) error {
++		stdoutBuf.Write(msg.GetStdout())
++		stderrBuf.Write(msg.GetStderr())
++		return nil
++	})
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	var stdoutBuf, stderrBuf bytes.Buffer
+-	var exit *ateenvv1alpha.Process
+-	for {
+-		msg, err := stream.Recv()
+-		if errors.Is(err, io.EOF) {
+-			break
+-		}
+-		if err != nil {
+-			return nil, fromGRPCError(err)
+-		}
+-		switch out := msg.GetOutput().(type) {
+-		case *ateenvv1alpha.ProcessOutput_Stdout:
+-			stdoutBuf.Write(out.Stdout)
+-		case *ateenvv1alpha.ProcessOutput_Stderr:
+-			stderrBuf.Write(out.Stderr)
+-		case *ateenvv1alpha.ProcessOutput_Exit:
+-			exit = out.Exit
+-		}
+-	}
+-	if exit == nil {
+-		return nil, errors.New("env: output stream ended before the process exited")
+-	}
+ 
+ 	return &ShellResponse{
+ 		Stdout:   stdoutBuf.String(),
+diff --git a/clients/go/process.go b/clients/go/process.go
+index 23edf89..64543f0 100644
+--- a/clients/go/process.go
++++ b/clients/go/process.go
+@@ -17,8 +17,10 @@ package env
+ import (
+ 	"context"
+ 	"errors"
++	"fmt"
+ 	"io"
+ 	"math"
++	"time"
+ 
+ 	ateenvv1alpha "github.com/agent-substrate/env/proto/ateenv/v1alpha"
+ 	"google.golang.org/grpc"
+@@ -64,10 +66,54 @@ func (e *Env) FindProcess(ctx context.Context, id string) (*ateenvv1alpha.Proces
+ // state. It follows the output stream with offsets past the end of the
+ // spool, so no output is transferred.
+ func (p *Process) Wait(ctx context.Context) (*ateenvv1alpha.Process, error) {
++	return p.follow(ctx, math.MaxInt64, math.MaxInt64, nil)
++}
++
++// Follow streams the process's output from the beginning until the process
++// exits, calling handle with each stdout or stderr message in order, and
++// returns the final process state. A stream cut on the way (see resume.go)
++// is reopened at the byte offsets already delivered, so handle sees every
++// byte exactly once. An error from handle stops the stream and is returned.
++func (p *Process) Follow(ctx context.Context, handle func(*ateenvv1alpha.ProcessOutput) error) (*ateenvv1alpha.Process, error) {
++	return p.follow(ctx, 0, 0, handle)
++}
++
++func (p *Process) follow(ctx context.Context, stdoutOffset, stderrOffset int64, handle func(*ateenvv1alpha.ProcessOutput) error) (*ateenvv1alpha.Process, error) {
++	stalled := 0 // cuts in a row without progress
++	for {
++		opened := time.Now()
++		stdoutBefore, stderrBefore := stdoutOffset, stderrOffset
++		exit, err := p.followOnce(ctx, &stdoutOffset, &stderrOffset, handle)
++		if err == nil {
++			return exit, nil
++		}
++		var handled *handlerError
++		if errors.As(err, &handled) {
++			return nil, handled.err
++		}
++		if stdoutOffset == stdoutBefore && stderrOffset == stderrBefore && time.Since(opened) < streamLifetimeMin {
++			stalled++
++		} else {
++			stalled = 0
++		}
++		if stalled > reconnectAttemptsMax {
++			return nil, fmt.Errorf("env: output stream of process %s failed %d times in a row without progress: %w", p.id, stalled, err)
++		}
++		if err := p.reconnect(ctx, err); err != nil {
++			return nil, err
++		}
++	}
++}
++
++// followOnce reads one output stream, advancing the offsets past every
++// delivered byte, until the exit message or the stream fails.
++func (p *Process) followOnce(ctx context.Context, stdoutOffset, stderrOffset *int64, handle func(*ateenvv1alpha.ProcessOutput) error) (*ateenvv1alpha.Process, error) {
++	ctx, cancel := context.WithCancel(ctx)
++	defer cancel()
+ 	stream, err := p.Output(ctx, &ateenvv1alpha.StreamProcessOutputRequest{
+ 		Follow:       true,
+-		StdoutOffset: math.MaxInt64,
+-		StderrOffset: math.MaxInt64,
++		StdoutOffset: *stdoutOffset,
++		StderrOffset: *stderrOffset,
+ 	})
+ 	if err != nil {
+ 		return nil, err
+@@ -80,12 +126,29 @@ func (p *Process) Wait(ctx context.Context) (*ateenvv1alpha.Process, error) {
+ 		if err != nil {
+ 			return nil, fromGRPCError(err)
+ 		}
+-		if exit := msg.GetExit(); exit != nil {
+-			return exit, nil
++		switch out := msg.GetOutput().(type) {
++		case *ateenvv1alpha.ProcessOutput_Exit:
++			return out.Exit, nil
++		case *ateenvv1alpha.ProcessOutput_Stdout:
++			*stdoutOffset += int64(len(out.Stdout))
++		case *ateenvv1alpha.ProcessOutput_Stderr:
++			*stderrOffset += int64(len(out.Stderr))
++		}
++		if handle != nil {
++			if err := handle(msg); err != nil {
++				return nil, &handlerError{err: err}
++			}
+ 		}
+ 	}
+ }
+ 
++// handlerError marks a failure of the caller's handler so follow returns it
++// as is, never as a cut stream: the offsets already count the bytes handed
++// to the handler, so a retry would skip them.
++type handlerError struct{ err error }
++
++func (e *handlerError) Error() string { return e.err.Error() }
++
+ // Signal delivers sig to the process and its process group.
+ func (p *Process) Signal(ctx context.Context, sig ateenvv1alpha.Signal) error {
+ 	_, err := p.env.client.process.SignalProcess(p.env.withEnv(ctx), &ateenvv1alpha.SignalProcessRequest{ProcessId: p.id, Signal: sig})
+@@ -128,22 +191,35 @@ func (p *Process) Output(ctx context.Context, req *ateenvv1alpha.StreamProcessOu
+ 
+ // Stdin opens a writer to the process's standard input. Writes are delivered
+ // as they happen; Close sends EOF. The process must have been started with
+-// stdin enabled. Errors from the guest surface on Write or Close.
++// stdin enabled. Errors from the guest surface on Write or Close. A cut input
++// stream (see resume.go) is reopened on the next write, which is then resent:
++// the guest keeps stdin open across input streams, and a message whose Send
++// failed never reached it.
+ func (p *Process) Stdin(ctx context.Context) (io.WriteCloser, error) {
+-	stream, err := p.env.client.process.WriteProcessInput(p.env.withEnv(ctx))
+-	if err != nil {
+-		return nil, fromGRPCError(err)
++	w := &stdinWriter{ctx: ctx, proc: p}
++	if err := w.open(); err != nil {
++		return nil, err
+ 	}
+-	return &stdinWriter{stream: stream, id: p.id}, nil
++	return w, nil
+ }
+ 
+ type stdinWriter struct {
++	ctx    context.Context
++	proc   *Process
+ 	stream ateenvv1alpha.ProcessService_WriteProcessInputClient
+-	id     string
+ 	sent   bool
+ 	closed bool
+ }
+ 
++func (w *stdinWriter) open() error {
++	stream, err := w.proc.env.client.process.WriteProcessInput(w.proc.env.withEnv(w.ctx))
++	if err != nil {
++		return fromGRPCError(err)
++	}
++	w.stream, w.sent = stream, false
++	return nil
++}
++
+ func (w *stdinWriter) Write(data []byte) (int, error) {
+ 	if w.closed {
+ 		return 0, errors.New("env: stdin is closed")
+@@ -170,15 +246,37 @@ func (w *stdinWriter) Close() error {
+ 	return fromGRPCError(err)
+ }
+ 
+-// send forwards one message, resolving the guest's real error when the
+-// stream has already been torn down (grpc reports that as io.EOF on Send).
++// send forwards one message, reopening the input stream while it is cut. One
++// message gets at most reconnectAttemptsMax fresh streams.
+ func (w *stdinWriter) send(req *ateenvv1alpha.WriteProcessInputRequest) error {
++	for attempt := 0; ; attempt++ {
++		err := w.sendOnce(req)
++		if err == nil {
++			return nil
++		}
++		if attempt == reconnectAttemptsMax {
++			w.closed = true
++			return fmt.Errorf("env: stdin of process %s failed on %d fresh streams: %w", w.proc.id, attempt, err)
++		}
++		if err := w.proc.reconnect(w.ctx, err); err != nil {
++			w.closed = true
++			return err
++		}
++		if err := w.open(); err != nil {
++			w.closed = true
++			return err
++		}
++	}
++}
++
++// sendOnce forwards one message, resolving the guest's real error when the
++// stream has already been torn down (grpc reports that as io.EOF on Send).
++func (w *stdinWriter) sendOnce(req *ateenvv1alpha.WriteProcessInputRequest) error {
+ 	if !w.sent {
+-		req.ProcessId = w.id
++		req.ProcessId = w.proc.id
+ 		w.sent = true
+ 	}
+ 	if err := w.stream.Send(req); err != nil {
+-		w.closed = true
+ 		if errors.Is(err, io.EOF) {
+ 			_, err = w.stream.CloseAndRecv()
+ 		}
+diff --git a/clients/go/resume.go b/clients/go/resume.go
+new file mode 100644
+index 0000000..3b6599d
+--- /dev/null
++++ b/clients/go/resume.go
+@@ -0,0 +1,100 @@
++// Copyright 2026 Google LLC
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package env
++
++import (
++	"context"
++	"fmt"
++	"time"
++
++	"google.golang.org/grpc/codes"
++	"google.golang.org/grpc/status"
++)
++
++// Process streams outlive the path that carries them. The atenet router bounds
++// every request with its route timeout, and port-forwards, router rollouts and
++// a sleeping laptop cut streams as well. The guest keeps a process running
++// across all of that: output stays spooled and addressable by byte offset, and
++// stdin accepts any number of input streams. So a cut stream is not a process
++// failure, and the client reopens it where it left off instead of surfacing
++// the cut to the caller.
++
++const (
++	// reconnectAttemptsMax bounds the probes after one cut, and the cuts in a
++	// row that make no progress. Each probe may itself wait out ate-env-api's
++	// wake budget while a suspended actor resumes, so this is a count, not a
++	// duration.
++	reconnectAttemptsMax = 5
++	// streamLifetimeMin separates a cut from a failure that repeats: a route
++	// timeout cuts a stream that has been open for minutes, while a stream
++	// that fails again within this time of opening, having delivered
++	// nothing, made no progress.
++	streamLifetimeMin       = time.Second
++	reconnectBackoffInitial = 200 * time.Millisecond
++	reconnectBackoffMax     = 2 * time.Second
++)
++
++// resumable reports whether err may be a cut path rather than an answer from
++// the guest. The guest answers with typed codes (NotFound, FailedPrecondition,
++// InvalidArgument, ...), which are final. A cut path shows up untyped:
++//   - Unavailable: a route timeout before any response, a refused
++//     connection, an actor that is still waking.
++//   - Internal: a route timeout on a stream that is already answering, sent
++//     as an HTTP/2 reset.
++//   - Unknown: Envoy's stream idle timeout, an HTTP 408 without gRPC status.
++//
++// A broken guest could also answer Internal or Unknown, so the reconnect
++// bounds, not this classification, keep that from looping.
++func resumable(err error) bool {
++	switch status.Code(err) {
++	case codes.Unavailable, codes.Internal, codes.Unknown:
++		return true
++	}
++	return false
++}
++
++// reconnect waits until the process is reachable again after a stream was cut
++// with cut. The probe is a GetProcess call, which also wakes a suspended
++// actor through ate-env-api. Probing first, rather than reopening the stream
++// blindly, separates a routine cut (the probe answers at once) from a path
++// that stays down (the probes run out), so an idle stream that is cut on every
++// route timeout never exhausts the bound.
++func (p *Process) reconnect(ctx context.Context, cut error) error {
++	if !resumable(cut) {
++		return cut
++	}
++	backoff := reconnectBackoffInitial
++	last := cut
++	for attempt := 1; attempt <= reconnectAttemptsMax; attempt++ {
++		if err := ctx.Err(); err != nil {
++			return err
++		}
++		_, err := p.env.FindProcess(ctx, p.id)
++		if err == nil {
++			return nil
++		}
++		if !resumable(err) {
++			return err
++		}
++		last = err
++		select {
++		case <-ctx.Done():
++			return ctx.Err()
++		case <-time.After(backoff):
++		}
++		backoff = min(backoff*2, reconnectBackoffMax)
++	}
++	return fmt.Errorf("env: process %s unreachable after %d reconnect attempts: %w", p.id, reconnectAttemptsMax, last)
++}
+diff --git a/cmd/ate-env/main.go b/cmd/ate-env/main.go
+--- a/cmd/ate-env/main.go
++++ b/cmd/ate-env/main.go
+@@ -29,7 +29,6 @@
+ 	"os"
+ 	"os/signal"
+ 	"strings"
+-	"sync/atomic"
+ 	"syscall"
+ 	"time"
+ 
+@@ -38,6 +37,8 @@
+ 	ateenvv1alpha "github.com/agent-substrate/env/proto/ateenv/v1alpha"
+ 	"github.com/spf13/cobra"
+ 	"golang.org/x/term"
++	"google.golang.org/grpc/codes"
++	"google.golang.org/grpc/status"
+ 	"google.golang.org/protobuf/types/known/durationpb"
+ )
+ 
+@@ -146,10 +147,6 @@
+ 	return guestCmd
+ }
+ 
+-// outputDrainTimeout bounds the wait for remaining output after the remote
+-// process has ended.
+-const outputDrainTimeout = 2 * time.Second
+-
+ // exitCodeError carries the exit code of a remote command to main. Returning
+ // it, instead of calling os.Exit, lets deferred cleanup run first: the
+ // terminal must leave raw mode before this process ends.
+@@ -203,54 +200,20 @@
+ 	}
+ 	defer stdin.Close()
+ 
++	// A failed input or resize ends the session: it records the error and
++	// cancels ctx, which stops Follow below.
+ 	ctx, cancel := context.WithCancel(ctx)
+ 	defer cancel()
+-	errCh := make(chan error, 4)
+-	var osc7501InactiveSeen atomic.Bool
++	errCh := make(chan error, 2)
++	fail := func(err error) {
++		errCh <- err
++		cancel()
++	}
+ 
+ 	go func() {
+ 		_, err := io.Copy(stdin, os.Stdin)
+ 		if err != nil && !errors.Is(err, os.ErrClosed) {
+-			errCh <- err
+-		}
+-	}()
+-	outputDone := make(chan struct{})
+-	go func() {
+-		defer close(outputDone)
+-		stream, err := proc.Output(ctx, &ateenvv1alpha.StreamProcessOutputRequest{Follow: true})
+-		if err != nil {
+-			errCh <- err
+-			return
+-		}
+-		var osc7501 osc7501Tracker
+-		for {
+-			msg, err := stream.Recv()
+-			if errors.Is(err, io.EOF) {
+-				return
+-			}
+-			if err != nil {
+-				errCh <- err
+-				return
+-			}
+-			switch out := msg.GetOutput().(type) {
+-			case *ateenvv1alpha.ProcessOutput_Stdout:
+-				if _, err := os.Stdout.Write(out.Stdout); err != nil {
+-					errCh <- err
+-					return
+-				}
+-				if suspendOnOSC7501Inactive && osc7501.inactive(out.Stdout) {
+-					osc7501InactiveSeen.Store(true)
+-				}
+-			case *ateenvv1alpha.ProcessOutput_Stderr:
+-				if _, err := os.Stderr.Write(out.Stderr); err != nil {
+-					errCh <- err
+-					return
+-				}
+-			case *ateenvv1alpha.ProcessOutput_Exit:
+-				// Wait reports the exit code; exiting here would skip the
+-				// deferred terminal restore.
+-				return
+-			}
++			fail(err)
+ 		}
+ 	}()
+ 	go func() {
+@@ -264,44 +227,52 @@
+ 			case <-sigCh:
+ 				width, height, err := term.GetSize(fd)
+ 				if err != nil {
+-					errCh <- fmt.Errorf("reading terminal size: %w", err)
++					fail(fmt.Errorf("reading terminal size: %w", err))
+ 					return
+ 				}
+-				if err := proc.Resize(ctx, uint32(height), uint32(width)); err != nil {
+-					errCh <- err
++				// A resize that lands while the path is cut is dropped; the
++				// next SIGWINCH sends the then-current size.
++				if err := proc.Resize(ctx, uint32(height), uint32(width)); err != nil && status.Code(err) != codes.Unavailable {
++					fail(err)
+ 					return
+ 				}
+ 			}
+ 		}
+ 	}()
+ 
+-	exit, err := proc.Wait(ctx)
+-	if err == nil {
+-		// The process has ended; let the stream deliver what it still holds
+-		// before it is cancelled.
+-		select {
+-		case <-outputDone:
+-		case <-time.After(outputDrainTimeout):
+-		}
+-	}
++	// Follow survives the router's route timeout and other cut streams, so
++	// the session lasts as long as the process, not as long as one request.
++	var osc7501 osc7501Tracker
++	osc7501InactiveSeen := false
++	exit, err := proc.Follow(ctx, func(msg *ateenvv1alpha.ProcessOutput) error {
++		switch out := msg.GetOutput().(type) {
++		case *ateenvv1alpha.ProcessOutput_Stdout:
++			if _, err := os.Stdout.Write(out.Stdout); err != nil {
++				return err
++			}
++			if suspendOnOSC7501Inactive && osc7501.inactive(out.Stdout) {
++				osc7501InactiveSeen = true
++			}
++		case *ateenvv1alpha.ProcessOutput_Stderr:
++			if _, err := os.Stderr.Write(out.Stderr); err != nil {
++				return err
++			}
++		}
++		return nil
++	})
+ 	cancel()
+ 	if err != nil {
+ 		select {
+-		case streamErr := <-errCh:
+-			return streamErr
++		case sessionErr := <-errCh:
++			return sessionErr
+ 		default:
+ 			return err
+ 		}
+ 	}
+-	select {
+-	case asyncErr := <-errCh:
+-		return asyncErr
+-	default:
+-	}
+ 	if code := int(exit.GetExitCode()); code != 0 {
+ 		return exitCodeError(code)
+ 	}
+-	if suspendOnOSC7501Inactive && osc7501InactiveSeen.Load() {
++	if suspendOnOSC7501Inactive && osc7501InactiveSeen {
+ 		if err := e.Suspend(context.WithoutCancel(ctx)); err != nil {
+ 			return err
+ 		}
+diff --git a/guest/process/service_test.go b/guest/process/service_test.go
+index 554b453..7988d47 100644
+--- a/guest/process/service_test.go
++++ b/guest/process/service_test.go
+@@ -502,7 +502,7 @@ func TestNotFound(t *testing.T) {
+ }
+ 
+ func TestConcurrencyLimiter(t *testing.T) {
+-	cfg := DefaultConfig("")
++	cfg := DefaultConfig(t.TempDir())
+ 	cfg.MaxConcurrentProcesses = 2
+ 	client := setupTestServerWithConfig(t, cfg)
+ 	ctx := context.Background()
+@@ -528,7 +528,7 @@ func TestConcurrencyLimiter(t *testing.T) {
+ }
+ 
+ func TestLogCapping(t *testing.T) {
+-	cfg := DefaultConfig("")
++	cfg := DefaultConfig(t.TempDir())
+ 	cfg.MaxLogBytes = 256
+ 	client := setupTestServerWithConfig(t, cfg)
+ 
+@@ -544,7 +544,7 @@ func TestLogCapping(t *testing.T) {
+ }
+ 
+ func TestDefaultTimeoutKills(t *testing.T) {
+-	cfg := DefaultConfig("")
++	cfg := DefaultConfig(t.TempDir())
+ 	cfg.DefaultProcessTimeout = 100 * time.Millisecond
+ 	client := setupTestServerWithConfig(t, cfg)
+ 
+diff --git a/internal/apiservice/server.go b/internal/apiservice/server.go
+index accfd45..e57fd29 100644
+--- a/internal/apiservice/server.go
++++ b/internal/apiservice/server.go
+@@ -293,28 +293,66 @@ func (s *Server) WriteProcessInput(stream grpc.ClientStreamingServer[ateenvv1alp
+ 	if err != nil {
+ 		return err
+ 	}
+-	for {
+-		req, err := stream.Recv()
+-		if errors.Is(err, io.EOF) {
+-			break
+-		}
+-		if err != nil {
+-			return err
++
++	// The guest side can end first: the router cuts every request at its
++	// route timeout. That has to reach the caller while the caller is idle.
++	// Otherwise the caller's next chunk is read here, lost on the dead
++	// upstream, and reported as a failure only after the caller's Send has
++	// already succeeded, so the caller cannot resend it. upstreamDone is the
++	// only receiver on clientStream; requests is the only receiver on stream.
++	var resp ateenvv1alpha.WriteProcessInputResponse
++	upstreamDone := make(chan error, 1)
++	go func() { upstreamDone <- clientStream.RecvMsg(&resp) }()
++	type received struct {
++		req *ateenvv1alpha.WriteProcessInputRequest
++		err error
++	}
++	requests := make(chan received)
++	go func() {
++		for {
++			req, err := stream.Recv()
++			select {
++			case requests <- received{req, err}:
++			case <-stream.Context().Done():
++				return
++			}
++			if err != nil {
++				return
++			}
+ 		}
+-		if err := clientStream.Send(req); err != nil {
+-			// The guest rejected the stream; surface its status instead of io.EOF.
+-			if errors.Is(err, io.EOF) {
+-				_, err = clientStream.CloseAndRecv()
++	}()
++
++	for {
++		select {
++		case err := <-upstreamDone:
++			if err == nil {
++				return stream.SendAndClose(&resp)
+ 			}
+ 			return err
++		case r := <-requests:
++			if errors.Is(r.err, io.EOF) {
++				if err := clientStream.CloseSend(); err != nil {
++					return err
++				}
++				if err := <-upstreamDone; err != nil {
++					return err
++				}
++				return stream.SendAndClose(&resp)
++			}
++			if r.err != nil {
++				return r.err
++			}
++			if err := clientStream.Send(r.req); err != nil {
++				// The guest ended the stream; surface its status instead of io.EOF.
++				if errors.Is(err, io.EOF) {
++					if upstreamErr := <-upstreamDone; upstreamErr != nil {
++						return upstreamErr
++					}
++				}
++				return err
++			}
+ 		}
+ 	}
+-
+-	resp, err := clientStream.CloseAndRecv()
+-	if err != nil {
+-		return err
+-	}
+-	return stream.SendAndClose(resp)
+ }
+ 
+ // ============================================================================
+diff --git a/internal/internaltest/fakerouter/fakerouter.go b/internal/internaltest/fakerouter/fakerouter.go
+index bf0b45a..73eaf4c 100644
+--- a/internal/internaltest/fakerouter/fakerouter.go
++++ b/internal/internaltest/fakerouter/fakerouter.go
+@@ -20,12 +20,16 @@
+ package fakerouter
+ 
+ import (
++	"context"
+ 	"net/http"
+ 	"net/http/httptest"
++	"strconv"
+ 	"strings"
+ 	"sync"
++	"time"
+ 
+ 	"github.com/agent-substrate/env/internal/ate"
++	"google.golang.org/grpc/codes"
+ )
+ 
+ // Router is a fake atenet router.
+@@ -33,6 +37,15 @@ type Router struct {
+ 	// Running reports whether the actor with the given ID is currently
+ 	// running. Non-running actors get a 503.
+ 	Running func(id string) bool
++	// RouteTimeout, when positive, ends every request that runs longer the
++	// way atenet-router's --route-timeout does: a request the guest has not
++	// answered yet gets Unavailable "upstream request timeout", and one it
++	// is already answering is reset (gRPC reports Internal).
++	RouteTimeout time.Duration
++	// CutAsIdleTimeout answers a cut the guest has not answered yet the way
++	// Envoy's stream idle timeout does, HTTP 408 without gRPC status (gRPC
++	// reports Unknown), instead of the route timeout's Unavailable.
++	CutAsIdleTimeout bool
+ 
+ 	mu     sync.Mutex
+ 	guests map[string]http.Handler
+@@ -68,7 +81,102 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+ 		http.Error(w, "actor "+id+" is not running", http.StatusServiceUnavailable)
+ 		return
+ 	}
+-	guest.ServeHTTP(w, req)
++	if r.RouteTimeout <= 0 {
++		guest.ServeHTTP(w, req)
++		return
++	}
++	// Like Envoy, stop relaying first; only then does the guest learn that
++	// its request is gone, so nothing it answers afterwards reaches the caller.
++	ctx, cancelGuest := context.WithCancel(req.Context())
++	defer cancelGuest()
++	cw := &cutWriter{ResponseWriter: w, header: w.Header()}
++	timer := time.AfterFunc(r.RouteTimeout, func() {
++		cw.cut()
++		cancelGuest()
++	})
++	guest.ServeHTTP(cw, req.WithContext(ctx))
++	timer.Stop()
++	answered, wasCut := cw.result()
++	if !wasCut {
++		return
++	}
++	if answered {
++		// Headers are gone; like Envoy, reset the stream.
++		panic(http.ErrAbortHandler)
++	}
++	h := w.Header()
++	clear(h)
++	if r.CutAsIdleTimeout {
++		http.Error(w, "stream timeout", http.StatusRequestTimeout)
++		return
++	}
++	// Cut before the guest answered: a trailers-only gRPC response.
++	h.Set("Content-Type", "application/grpc")
++	h.Set("Grpc-Status", strconv.Itoa(int(codes.Unavailable)))
++	h.Set("Grpc-Message", "upstream request timeout")
++	w.WriteHeader(http.StatusOK)
++}
++
++// cutWriter forwards the guest's response until the cut, then drops it, the
++// way a proxy stops relaying a request it has timed out. It records whether
++// the guest had sent response headers by the time of the cut.
++type cutWriter struct {
++	http.ResponseWriter
++
++	mu       sync.Mutex
++	header   http.Header // the real header map until the cut
++	wrote    bool
++	isCut    bool
++	answered bool
++}
++
++func (w *cutWriter) cut() {
++	w.mu.Lock()
++	defer w.mu.Unlock()
++	w.isCut, w.answered = true, w.wrote
++	w.header = http.Header{}
++}
++
++func (w *cutWriter) result() (answered, cut bool) {
++	w.mu.Lock()
++	defer w.mu.Unlock()
++	return w.answered, w.isCut
++}
++
++func (w *cutWriter) Header() http.Header {
++	w.mu.Lock()
++	defer w.mu.Unlock()
++	return w.header
++}
++
++func (w *cutWriter) WriteHeader(code int) {
++	w.mu.Lock()
++	defer w.mu.Unlock()
++	if w.isCut {
++		return
++	}
++	w.wrote = true
++	w.ResponseWriter.WriteHeader(code)
++}
++
++func (w *cutWriter) Write(p []byte) (int, error) {
++	w.mu.Lock()
++	defer w.mu.Unlock()
++	if w.isCut {
++		return len(p), nil
++	}
++	w.wrote = true
++	return w.ResponseWriter.Write(p)
++}
++
++func (w *cutWriter) Flush() {
++	w.mu.Lock()
++	defer w.mu.Unlock()
++	if w.isCut {
++		return
++	}
++	w.wrote = true
++	w.ResponseWriter.(http.Flusher).Flush()
+ }
+ 
+ func actorID(req *http.Request) (string, bool) {

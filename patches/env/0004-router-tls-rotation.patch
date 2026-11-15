@@ -1,0 +1,408 @@
+Router TLS credential and trust-bundle rotation for agent-substrate/env.
+
+Ported from Samuel Huber's environment reliability patches. Applies to env
+56424de763f91daa6b6c38f6249bacef1d82e5e1 after patches 0001 and 0002.
+
+Re-read the client credential bundle and router CA bundle on each TLS
+handshake, caching parsed certificates by content. Verify the current peer
+chain, DNS name and server-auth EKU against the current trust bundle.
+Tests cover client and CA rotation and reject untrusted, misnamed and
+client-only serving certificates. No deployment policy is included.
+
+diff --git a/internal/ate/router_tls.go b/internal/ate/router_tls.go
+index 369c7d7..aa6ff76 100644
+--- a/internal/ate/router_tls.go
++++ b/internal/ate/router_tls.go
+@@ -15,11 +15,13 @@
+ package ate
+ 
+ import (
++	"bytes"
+ 	"crypto/tls"
+ 	"crypto/x509"
+ 	"errors"
+ 	"fmt"
+ 	"os"
++	"sync"
+ 
+ 	"google.golang.org/grpc/credentials"
+ )
+@@ -30,43 +32,104 @@ const RouterServerName = "atenet-router.ate-system.svc"
+ 
+ // RouterTLSCredentials returns mTLS credentials for the atenet router's
+ // ingress listener, which only admits clients presenting a pod identity
+-// certificate whose SPIFFE ID is on its --ingress-allowed-spiffe-ids list.
+-// credentialBundle is a PEM file holding the client certificate chain and
+-// key (a podCertificate projection); caFile is the PEM trust bundle the
+-// router's serving certificate chains to. The credential bundle is re-read
+-// on every handshake so rotated pod certificates are picked up.
++// certificate whose SPIFFE ID it allows. credentialBundle is a PEM file
++// holding the client certificate chain and key (a podCertificate
++// projection); caFile is the PEM trust bundle the router's serving
++// certificate chains to (a clusterTrustBundle projection). The kubelet
++// rotates both files in place, so both are re-read on every handshake: a
++// process that outlives its first certificate keeps presenting a valid one
++// and keeps trusting a rotated router CA. Parsing happens only when the file
++// bytes change. Unreadable or malformed files fail here, at startup.
+ func RouterTLSCredentials(credentialBundle, caFile string) (credentials.TransportCredentials, error) {
+-	caPEM, err := os.ReadFile(caFile)
+-	if err != nil {
+-		return nil, fmt.Errorf("ate: reading router CA bundle: %w", err)
+-	}
+-	roots := x509.NewCertPool()
+-	if !roots.AppendCertsFromPEM(caPEM) {
+-		return nil, fmt.Errorf("ate: router CA bundle %s holds no certificates", caFile)
++	r := &routerTLS{bundlePath: credentialBundle, caPath: caFile}
++	if _, err := r.clientCertificate(); err != nil {
++		return nil, err
+ 	}
+-	if _, err := loadCredentialBundle(credentialBundle); err != nil {
++	if _, err := r.trustRoots(); err != nil {
+ 		return nil, err
+ 	}
+ 	return credentials.NewTLS(&tls.Config{
+ 		MinVersion: tls.VersionTLS12,
+-		RootCAs:    roots,
+ 		ServerName: RouterServerName,
+ 		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+-			return loadCredentialBundle(credentialBundle)
++			return r.clientCertificate()
+ 		},
++		// RootCAs is fixed for the life of a tls.Config; verification moves
++		// to VerifyConnection, against the current trust bundle, so the
++		// bundle can rotate.
++		InsecureSkipVerify: true,
++		VerifyConnection:   r.verifyConnection,
+ 	}), nil
+ }
+ 
+-// loadCredentialBundle parses a PEM file holding a certificate chain and its
+-// private key.
+-func loadCredentialBundle(path string) (*tls.Certificate, error) {
+-	data, err := os.ReadFile(path)
++// routerTLS caches the parsed router credentials by file content.
++type routerTLS struct {
++	bundlePath string
++	caPath     string
++
++	mu        sync.Mutex
++	bundlePEM []byte
++	caPEM     []byte
++	cert      *tls.Certificate
++	roots     *x509.CertPool
++}
++
++func (r *routerTLS) clientCertificate() (*tls.Certificate, error) {
++	data, err := os.ReadFile(r.bundlePath)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("ate: reading router credential bundle: %w", err)
+ 	}
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	if r.cert != nil && bytes.Equal(data, r.bundlePEM) {
++		return r.cert, nil
++	}
+ 	cert, err := tls.X509KeyPair(data, data)
+ 	if err != nil {
+-		return nil, errors.Join(fmt.Errorf("ate: parsing router credential bundle %s", path), err)
++		return nil, errors.Join(fmt.Errorf("ate: parsing router credential bundle %s", r.bundlePath), err)
++	}
++	r.bundlePEM, r.cert = data, &cert
++	return r.cert, nil
++}
++
++func (r *routerTLS) trustRoots() (*x509.CertPool, error) {
++	data, err := os.ReadFile(r.caPath)
++	if err != nil {
++		return nil, fmt.Errorf("ate: reading router CA bundle: %w", err)
++	}
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	if r.roots != nil && bytes.Equal(data, r.caPEM) {
++		return r.roots, nil
++	}
++	roots := x509.NewCertPool()
++	if !roots.AppendCertsFromPEM(data) {
++		return nil, fmt.Errorf("ate: router CA bundle %s holds no certificates", r.caPath)
++	}
++	r.caPEM, r.roots = data, roots
++	return r.roots, nil
++}
++
++// verifyConnection is the verification crypto/tls performs when
++// InsecureSkipVerify is false: the peer chain must reach a trusted root and
++// the leaf must be valid for ServerName and for server authentication.
++func (r *routerTLS) verifyConnection(state tls.ConnectionState) error {
++	if len(state.PeerCertificates) == 0 {
++		return errors.New("ate: atenet router presented no certificate")
++	}
++	roots, err := r.trustRoots()
++	if err != nil {
++		return err
++	}
++	intermediates := x509.NewCertPool()
++	for _, cert := range state.PeerCertificates[1:] {
++		intermediates.AddCert(cert)
+ 	}
+-	return &cert, nil
++	_, err = state.PeerCertificates[0].Verify(x509.VerifyOptions{
++		DNSName:       state.ServerName,
++		Roots:         roots,
++		Intermediates: intermediates,
++		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
++	})
++	return err
+ }
+diff --git a/internal/ate/router_tls_test.go b/internal/ate/router_tls_test.go
+new file mode 100644
+index 0000000..c4b42bc
+--- /dev/null
++++ b/internal/ate/router_tls_test.go
+@@ -0,0 +1,247 @@
++// Copyright 2026 Google LLC
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package ate_test
++
++import (
++	"context"
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/tls"
++	"crypto/x509"
++	"crypto/x509/pkix"
++	"encoding/pem"
++	"math/big"
++	"net"
++	"os"
++	"path/filepath"
++	"testing"
++	"time"
++
++	"github.com/agent-substrate/env/internal/ate"
++	"google.golang.org/grpc/credentials"
++)
++
++type testCA struct {
++	cert *x509.Certificate
++	key  *ecdsa.PrivateKey
++	pem  []byte
++}
++
++var testSerial int64
++
++func newTestCA(t *testing.T, name string) testCA {
++	t.Helper()
++	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	testSerial++
++	template := &x509.Certificate{
++		SerialNumber:          big.NewInt(testSerial),
++		Subject:               pkix.Name{CommonName: name},
++		NotBefore:             time.Now().Add(-time.Hour),
++		NotAfter:              time.Now().Add(time.Hour),
++		IsCA:                  true,
++		BasicConstraintsValid: true,
++		KeyUsage:              x509.KeyUsageCertSign,
++	}
++	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
++	if err != nil {
++		t.Fatal(err)
++	}
++	cert, err := x509.ParseCertificate(der)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return testCA{cert: cert, key: key, pem: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})}
++}
++
++// issue returns a leaf signed by ca as a PEM bundle (certificate then key),
++// the layout of a projected podCertificate credential bundle, and its serial.
++func (ca testCA) issue(t *testing.T, usage x509.ExtKeyUsage, dnsName string) ([]byte, tls.Certificate, *big.Int) {
++	t.Helper()
++	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	testSerial++
++	serial := big.NewInt(testSerial)
++	template := &x509.Certificate{
++		SerialNumber: serial,
++		Subject:      pkix.Name{CommonName: "leaf"},
++		NotBefore:    time.Now().Add(-time.Hour),
++		NotAfter:     time.Now().Add(time.Hour),
++		KeyUsage:     x509.KeyUsageDigitalSignature,
++		ExtKeyUsage:  []x509.ExtKeyUsage{usage},
++	}
++	if dnsName != "" {
++		template.DNSNames = []string{dnsName}
++	}
++	der, err := x509.CreateCertificate(rand.Reader, template, ca.cert, &key.PublicKey, ca.key)
++	if err != nil {
++		t.Fatal(err)
++	}
++	keyDER, err := x509.MarshalECPrivateKey(key)
++	if err != nil {
++		t.Fatal(err)
++	}
++	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
++	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
++	pair, err := tls.X509KeyPair(certPEM, keyPEM)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return append(certPEM, keyPEM...), pair, serial
++}
++
++// swapFile replaces path the way the kubelet atomic writer does: the new
++// content appears under the same path in one rename.
++func swapFile(t *testing.T, path string, data []byte) {
++	t.Helper()
++	tmp := path + ".tmp"
++	if err := os.WriteFile(tmp, data, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Rename(tmp, path); err != nil {
++		t.Fatal(err)
++	}
++}
++
++// handshake runs one client handshake through creds against
++// a server presenting serving and requiring a client certificate from
++// clientCA. It returns the serial of the client certificate the server saw.
++func handshake(t *testing.T, creds credentials.TransportCredentials, serving tls.Certificate, clientCA testCA) (*big.Int, error) {
++	t.Helper()
++	clientCAs := x509.NewCertPool()
++	clientCAs.AddCert(clientCA.cert)
++	listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
++		Certificates: []tls.Certificate{serving},
++		ClientAuth:   tls.RequireAndVerifyClientCert,
++		ClientCAs:    clientCAs,
++		MinVersion:   tls.VersionTLS12,
++		NextProtos:   []string{"h2"},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer listener.Close()
++	seen := make(chan *big.Int, 1)
++	go func() {
++		conn, err := listener.Accept()
++		if err != nil {
++			seen <- nil
++			return
++		}
++		defer conn.Close()
++		tlsConn := conn.(*tls.Conn)
++		if tlsConn.Handshake() != nil || len(tlsConn.ConnectionState().PeerCertificates) == 0 {
++			seen <- nil
++			return
++		}
++		seen <- tlsConn.ConnectionState().PeerCertificates[0].SerialNumber
++	}()
++	raw, err := net.Dial("tcp", listener.Addr().String())
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer raw.Close()
++	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++	defer cancel()
++	conn, _, err := creds.ClientHandshake(ctx, ate.RouterServerName, raw)
++	if err != nil {
++		return nil, err
++	}
++	defer conn.Close()
++	return <-seen, nil
++}
++
++func TestRouterTLSCredentialsFollowsRotatedCertificateAndTrustBundle(t *testing.T) {
++	dir := t.TempDir()
++	bundlePath := filepath.Join(dir, "credential-bundle.pem")
++	caPath := filepath.Join(dir, "router-ca.pem")
++
++	clientCA := newTestCA(t, "podidentity")
++	routerCA1 := newTestCA(t, "servicedns-1")
++	_, serving1, _ := routerCA1.issue(t, x509.ExtKeyUsageServerAuth, ate.RouterServerName)
++	bundle1, _, serial1 := clientCA.issue(t, x509.ExtKeyUsageClientAuth, "")
++	swapFile(t, bundlePath, bundle1)
++	swapFile(t, caPath, routerCA1.pem)
++
++	r, err := ate.RouterTLSCredentials(bundlePath, caPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	got, err := handshake(t, r, serving1, clientCA)
++	if err != nil {
++		t.Fatalf("initial handshake: %v", err)
++	}
++	if got.Cmp(serial1) != 0 {
++		t.Fatalf("server saw client serial %v, want %v", got, serial1)
++	}
++
++	// The kubelet rotates the pod certificate: the next handshake on the
++	// same credentials presents the new one.
++	bundle2, _, serial2 := clientCA.issue(t, x509.ExtKeyUsageClientAuth, "")
++	swapFile(t, bundlePath, bundle2)
++	got, err = handshake(t, r, serving1, clientCA)
++	if err != nil {
++		t.Fatalf("handshake after client rotation: %v", err)
++	}
++	if got.Cmp(serial2) != 0 {
++		t.Fatalf("server saw client serial %v after rotation, want %v", got, serial2)
++	}
++
++	// The trust bundle rotates to a new router CA: the router's new serving
++	// certificate is trusted and one from the retired CA no longer is.
++	routerCA2 := newTestCA(t, "servicedns-2")
++	_, serving2, _ := routerCA2.issue(t, x509.ExtKeyUsageServerAuth, ate.RouterServerName)
++	swapFile(t, caPath, routerCA2.pem)
++	if _, err := handshake(t, r, serving2, clientCA); err != nil {
++		t.Fatalf("handshake after trust bundle rotation: %v", err)
++	}
++	if _, err := handshake(t, r, serving1, clientCA); err == nil {
++		t.Fatal("handshake trusted a router certificate from the retired CA")
++	}
++}
++
++func TestRouterTLSCredentialsRejectsUntrustedOrMisnamedRouter(t *testing.T) {
++	dir := t.TempDir()
++	bundlePath := filepath.Join(dir, "credential-bundle.pem")
++	caPath := filepath.Join(dir, "router-ca.pem")
++
++	clientCA := newTestCA(t, "podidentity")
++	routerCA := newTestCA(t, "servicedns")
++	bundle, _, _ := clientCA.issue(t, x509.ExtKeyUsageClientAuth, "")
++	swapFile(t, bundlePath, bundle)
++	swapFile(t, caPath, routerCA.pem)
++	r, err := ate.RouterTLSCredentials(bundlePath, caPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	_, untrusted, _ := newTestCA(t, "other").issue(t, x509.ExtKeyUsageServerAuth, ate.RouterServerName)
++	_, misnamed, _ := routerCA.issue(t, x509.ExtKeyUsageServerAuth, "other.ate-system.svc")
++	_, clientOnly, _ := routerCA.issue(t, x509.ExtKeyUsageClientAuth, ate.RouterServerName)
++	for name, serving := range map[string]tls.Certificate{
++		"untrusted CA":       untrusted,
++		"wrong DNS name":     misnamed,
++		"no server auth EKU": clientOnly,
++	} {
++		if _, err := handshake(t, r, serving, clientCA); err == nil {
++			t.Errorf("%s: handshake succeeded", name)
++		}
++	}
++}

@@ -22,6 +22,8 @@ buildGoModule {
     ../patches/env/0001-pty-process-streams.patch
     ../patches/env/0002-substrate-v1.0.0.patch
     ../patches/env/0003-free-slot-before-exit.patch
+    ../patches/env/0004-router-tls-rotation.patch
+    ../patches/env/0005-resume-cut-process-streams.patch
   ];
 
   vendorHash = "sha256-t6Tuhd5+Jcp66eflF4TYyepqri8Q3JaId2cnae0KDlU=";
@@ -32,6 +34,8 @@ buildGoModule {
     "cmd/ate-env-guest"
     "guest/process"
     "internal/apiservice"
+    "internal/ate"
+    "clients/go"
   ];
 
   env.CGO_ENABLED = 0;
@@ -41,7 +45,7 @@ buildGoModule {
   ];
 
   meta = {
-    description = "Agent Substrate env (ate-env CLI, API, guest) with PTY process streams";
+    description = "Agent Substrate env with PTY streams, TLS rotation and stream recovery";
     homepage = "https://github.com/agent-substrate/env";
     license = lib.licenses.asl20;
     mainProgram = "ate-env";
