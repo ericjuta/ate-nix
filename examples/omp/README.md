@@ -24,7 +24,7 @@ The env package remains pinned to [`56424de763f91daa6b6c38f6249bacef1d82e5e1`](h
 
 Before creating an environment:
 
-1. Install Agent Substrate and enable this repository's Nix-image support on the nodes serving the env worker pool. See [operating.md](../../docs/operating.md). The node daemon must trust a cache containing the complete signed OMP image closure.
+1. Install Agent Substrate and enable this repository's Nix-image support on the nodes serving the env worker pool. See [install.md](../../docs/install.md) and [operating.md](../../docs/operating.md). The node daemon must trust a cache containing the complete signed OMP image closure.
 2. Deploy **this build's** `ate-env-api`, not an unpatched upstream API image. Build `.#ate-env-api-image` and publish it to your registry; `ate-env manifest --api-image <digest-pinned-ref> --worker-image <your-worker-image>` generates the env deployment. The worker image and snapshot storage must already be configured for your cluster.
 3. Authorize the env service account in Substrate and admit its identity to the router, following your cluster's authentication setup. The [reference example](../reference/README.md#open-a-terminal-in-the-agent-image) shows the required env atespace/access-policy steps. This example does not install or change cluster policy.
 4. Ensure the env worker pool has the label `workload: ate-env`, runs on Nix-enabled nodes, and has capacity for this template's **2 CPUs and 4 GiB** per active actor. Adjust the template and pool together if necessary.

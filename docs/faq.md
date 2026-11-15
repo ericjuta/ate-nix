@@ -4,7 +4,7 @@
 No. It is an independent set of patches on top of upstream releases. It is not affiliated with Agent Substrate or its maintainers.
 
 **Is it ready for production?**
-No. It is proven on one single-node test cluster and has had no security review. [proof.md](proof.md) lists what is tested.
+No. Everything that ran on a cluster ran on a single-node local test cluster, and nothing has had a security review. [proof.md](proof.md) lists what is tested, feature by feature.
 
 **Do I need NixOS?**
 No. Each node needs a Nix installation and a running Nix daemon. The Linux distribution does not matter. The proof ran on a Debian node. A NixOS module exists as a convenience.
@@ -36,7 +36,18 @@ Not into its image. The image under the actor is read-only. What the agent write
 The node may delete the view when no actor on that node uses it. When the actor resumes, the node downloads the closure again if necessary. Keep the closure in your cache while the actor exists.
 
 **Which Substrate components do I have to replace?**
-Two: `atelet` and `ateapi`. Workers, the router and all other components stay on the upstream release.
+It depends on the feature.
+
+- **Nix actor images:** two, `atelet` and `ateapi`. Workers, the router and all other components stay on the upstream release.
+- **Older node kernels (before Linux 6.6.23):** also the worker images, which carry the overlay mount fallback. See [install.md](install.md#publish-a-complete-oci-release).
+- **PTY streams:** the three env programs (`ate-env`, `ate-env-api`, `ate-env-guest`). Substrate itself is unchanged.
+- **Registry-free system pods:** none are replaced one by one. The installer takes every pod reference from an image map. See [nix-images.md](nix-images.md#registry-free-substrate-system-pods).
+
+**What is OMP, and do I need it?**
+[Oh My Pi](https://github.com/can1357/oh-my-pi) is an open-source coding agent that runs in a terminal. This repository packages it as one example of a real agent in a Nix image. You do not need it for anything else here. See [../examples/omp/README.md](../examples/omp/README.md).
+
+**How long does a build take?**
+A few minutes for one package. One to two hours for everything from an empty store, because the registry-free bundle and the OMP image compile large programs. [getting-started.md](getting-started.md#time-and-disk) has the numbers.
 
 **Which versions does this work with?**
 Substrate v1.0.0 and env at commit `56424de`. [maintaining.md](maintaining.md) shows how to move to a newer release.

@@ -225,7 +225,7 @@ crictl info
 
 Build/install `ate-substrate` and put `ate-setup`, `kubectl-ate`, `kubectl`, and `kustomize` on the operator's PATH as described in [getting-started.md](getting-started.md). Use absolute map paths. `--image-map` excludes `--image-repo` and `--image-tag`, and `ATE_IMAGE_MAP` is its environment equivalent.
 
-For an existing cluster, first provision the S3 Secret and configuration described in [operating.md](operating.md), then:
+For an existing cluster, first provision the S3 Secret and configuration described in [install.md](install.md), then:
 
 ```sh
 map=$(nix build --no-link --print-out-paths .#substrate-image-map)

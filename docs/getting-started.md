@@ -1,8 +1,6 @@
 # Getting started
 
-Build the patched binaries and deployment tools. The build and help commands
-on this page need no cluster. [operating.md](operating.md) covers installing
-Substrate on an existing non-GKE cluster as well as enabling Nix actor images.
+Build the patched programs and look at them. Nothing on this page needs a cluster.
 
 ## Requirements
 
@@ -41,6 +39,8 @@ ATE_PACKAGE="$(nix build --no-link --print-out-paths .#ate-substrate)"
 
 The first build downloads the upstream source and compiles it. The build also runs the Go tests of the patched packages. A failed test fails the build.
 
+`ate-setup` is the Substrate installer and `kubectl-ate` is its `kubectl` plugin. [install.md](install.md) uses them.
+
 ## Build without Nix on the host
 
 Define this shell function. It runs Nix in a container and keeps the Nix store in a Docker volume named `ate-nix-store`, so the second build is fast.
@@ -67,12 +67,32 @@ docker run --rm -v ate-nix-store:/nix -v "$PWD/out:/out" busybox cp -L <store pa
 | Output | What it is |
 | --- | --- |
 | `.#ate-env` (default) | `ate-env`, `ate-env-api`, `ate-env-guest` with PTY streams. See [pty.md](pty.md). |
-| `.#ate-substrate` | `atelet`, `ateapi`, `ate-setup`, and `kubectl-ate` from patched Substrate v1.0.0. The installer supports `--existing-cluster`; see [operating.md](operating.md). |
+| `.#ate-substrate` | `atelet`, `ateapi`, `ate-setup`, and `kubectl-ate` from patched Substrate v1.0.0. The installer supports `--existing-cluster`; see [install.md](install.md). |
 | `.#ate-substrate.patchedSrc` | The exact patched source and runtime resources, including the worker overlayfs compatibility patch. Use this source to publish a complete OCI release, not just the two binary images below. |
 | `.#atelet-image`, `.#ateapi-image` | Container images of those two binaries, as `docker load` tarballs. Linux only. |
 | `.#ate-env-api-image` | Container image of the patched `ate-env-api`, as a `docker load` tarball. Linux only. |
 | `.#example-image` | A small Nix image: bash and coreutils. |
 | `.#proof-image` | The Nix image that the local proof starts: a small HTTP server. |
+| `.#omp-image` | A Nix image with the OMP coding agent and the env guest. Linux only. See [../examples/omp/README.md](../examples/omp/README.md). |
+| `.#substrate-nix-bundle` | Every Substrate system pod, worker and demo actor as Nix closures, with the installer image map. Linux only. See [nix-images.md](nix-images.md#registry-free-substrate-system-pods). |
+| `.#substrate-image-map`, `.#substrate-image-map-check` | The image map alone, and the test that checks each entry of the built map. Linux only. |
+| `.#nix-snapshotter` | The pinned nix-snapshotter that the registry-free path uses. Linux only. |
+| `.#substrate-installer-tests`, `.#substrate-envoy-module-check` | Test-only outputs: the installer's test packages, and a load test of the Envoy module. Linux only. |
+
+[concepts.md](concepts.md#other-names-you-will-meet) defines OMP, image map and nix-snapshotter.
+
+### Time and disk
+
+The first build of anything downloads a compiler toolchain, so it is the slow one. Later builds reuse the store.
+
+| Build | From an empty store |
+| --- | --- |
+| `.#ate-env`, `.#ate-substrate`, the three container images, `.#example-image`, `.#proof-image` | Minutes. These compile Go programs only. |
+| `.#omp-image` | More than an hour on an 8-core machine. It compiles a Rust toolchain and OMP's native code. |
+| `.#substrate-nix-bundle` | About an hour on the 4-core CI machines. It compiles Jaeger, the OpenTelemetry Collector and an Envoy module. |
+| `nix flake check` (everything) | 86 to 107 minutes on the 4-core CI machines. The compressed result is 4 to 5 GB for each system; allow 20 GB of disk. |
+
+You need the last three only for OMP, for the registry-free path, or to send a change.
 
 Check that all outputs evaluate, without a build:
 
@@ -101,30 +121,8 @@ For a complete project on top of this flake (a dev shell, an app and two actor i
 `pkgs.ateNixImage` is the function that builds a Nix image. [nix-images.md](nix-images.md) shows how to call it.
 On NixOS nodes, `ate-nix.nixosModules.ate-node` prepares the node. [operating.md](operating.md) shows the options.
 
-## Install outside GKE
-
-The packaged `ate-setup` preserves upstream defaults: `--kind` selects the
-local development profile, and omitting both profile flags keeps the GKE path.
-`--existing-cluster` (or `existingCluster: {enabled: true}` in a `SubstrateInstall` file)
-intentionally selects an already-provisioned non-GKE cluster. It uses
-kubeconfig and an operator-managed S3 Secret, without Docker/Kind preflight,
-a local registry, or bundled development services.
-
-A prebuilt gVisor installation uses upstream `--image-repo` and `--image-tag`
-with `--sandbox-classes=gvisor`, so the operator needs neither Go/ko nor
-Docker. The explicit sandbox selection avoids the upstream GKE/Kind-specific
-microVM asset bootstrap. Someone must first publish the
-**complete patched release**, including both worker images and
-`envoy-dataplane`. The two OCI tarballs exported by this flake are not a
-complete release. [operating.md](operating.md#publish-a-complete-oci-release)
-gives the full build/publish command using the exposed patched source and the
-package's Go development environment.
-
-The cluster must provide the required certificate APIs and feature gates;
-ordinary Kubernetes access alone is not sufficient. Follow the
-[cluster prerequisites](operating.md#cluster-prerequisites) before deploying.
-
 ## Next
 
 - See an actor start from a store path on a local cluster: [../kind/README.md](../kind/README.md).
-- Run it on a real cluster: [operating.md](operating.md).
+- Install Substrate on a cluster that you already have: [install.md](install.md).
+- Enable Nix images on a cluster that runs Substrate: [operating.md](operating.md).

@@ -1,14 +1,23 @@
 # ate-nix
 
-Run [Agent Substrate](https://ate.dev) actors from Nix store paths, and open real terminals in remote environments.
-Two patch sets on top of pinned upstream releases, packaged as a Nix flake. No fork: upstream is fetched by hash and the changes are patch files in this repository.
+[Agent Substrate](https://ate.dev) runs sandboxed AI agents ("actors") on Kubernetes, and saves an idle agent to a snapshot until it is needed again.
+This repository is a set of patches on top of pinned Agent Substrate releases, packaged as a Nix flake. It is not a fork: upstream is fetched by hash and the changes are patch files here.
 
-| Package | Upstream | Adds |
+New to Agent Substrate or Nix? [docs/README.md](docs/README.md) explains both from nothing.
+
+## What you can do with it
+
+| You can | How | Start at |
 | --- | --- | --- |
-| `ate-substrate` | `agent-substrate/substrate` v1.0.0 | **Nix images.** `image: nix:/nix/store/<hash>-<name>` in an actor template. No registry, no image build, no image pull. OCI images continue to work. |
-| `ate-env` | `agent-substrate/env` | **PTY streams.** `ate-env <id> shell --tty <command>`: an interactive terminal in a remote environment. Samuel Huber's patch, rebased. |
+| **Start an agent from a Nix store path** instead of a container image. No registry, no image build, no image pull. Container images continue to work. | `image: nix:/nix/store/<hash>-<name>` in an actor template | [docs/nix-images.md](docs/nix-images.md) |
+| **Open a real terminal in a remote environment.** Full-screen programs, resize, Ctrl-C. Samuel Huber's patch, rebased. | `ate-env <id> shell --tty <command>` | [docs/pty.md](docs/pty.md) |
+| **Install Substrate on a cluster that you already have.** Upstream's installer targets Google's GKE or a local test cluster. | `ate-setup deploy --existing-cluster` | [docs/install.md](docs/install.md) |
+| **Run Substrate's own pods from a Nix cache too**, with no container registry. Optional. | `nix build .#substrate-nix-bundle`, then `ate-setup --image-map` | [docs/nix-images.md](docs/nix-images.md#registry-free-substrate-system-pods) |
+| **Run a real coding agent in an actor.** A worked example with [Oh My Pi](https://github.com/can1357/oh-my-pi) (OMP). It contains no credentials. | `nix build .#omp-image`, then `ate-env <id> shell --tty omp` | [examples/omp](examples/omp/README.md) |
 
-**Status: experimental.** Nix images are proven on one single-node test cluster. There has been no security review. This project is not affiliated with Agent Substrate. See [docs/proof.md](docs/proof.md).
+Each row is usable without the others.
+
+**Status: experimental.** Everything that ran on a cluster ran on a single-node local test cluster. Some parts are tested only without a cluster. There has been no security review. This project is not affiliated with Agent Substrate. [docs/proof.md](docs/proof.md) lists what is tested, feature by feature.
 
 ## Why Nix images
 
@@ -39,60 +48,8 @@ nix build .#ate-substrate && ./result/bin/atelet --help | grep nix
 nix build .#ate-env && ./result/bin/ate-env --help
 ```
 
-No Nix on your machine? [docs/getting-started.md](docs/getting-started.md) shows the same build with only Docker.
+Each build takes a few minutes the first time. No Nix on your machine? [docs/getting-started.md](docs/getting-started.md) shows the same build with only Docker.
 To see an actor boot from a store path on a local throwaway cluster, follow [kind/README.md](kind/README.md).
-
-
-### Run OMP in an actor
-
-The Linux `omp-image` output combines pinned upstream [Oh My Pi](https://github.com/can1357/oh-my-pi)
-with the patched env guest and a writable workspace:
-
-```sh
-nix build .#omp-image
-```
-
-Publish its signed closure to your binary cache, use the resulting
-`nix:/nix/store/...` reference in an env actor template, and connect with
-`ate-env <id> shell --tty omp`. The image contains no provider credentials
-or organization configuration. See [examples/omp](examples/omp) for setup.
-
-### Install outside GKE
-
-`ate-substrate` also supplies `ate-setup` and `kubectl-ate`. The installer
-includes its pinned manifests, so prebuilt-image deployments work from any
-directory:
-
-```sh
-nix build .#ate-substrate
-./result/bin/ate-setup deploy ate-system --existing-cluster --help
-```
-
-The existing-cluster profile uses your kubeconfig rather than GCP discovery
-or a local Docker/Kind preflight. It still requires the upstream certificate
-APIs, Linux node capabilities, persistent storage, and snapshot storage.
-See [docs/operating.md](docs/operating.md) for the complete publishing and
-installation procedure, including the older-kernel worker compatibility path.
-
-### Run Substrate pods without a container registry
-
-The Linux `substrate-nix-bundle` output supplies closure-backed system pods,
-worker pods, demo actor roots, and an installer image map. The optional
-NixOS snapshotter module connects standalone containerd and kubelet to
-pinned upstream nix-snapshotter:
-
-```sh
-nix build .#substrate-nix-bundle .#substrate-image-map-check
-```
-
-Publish the signed bundle to your Nix binary cache and install with
-`ate-setup --image-map`; see [docs/nix-images.md](docs/nix-images.md#registry-free-substrate-system-pods)
-for the complete node and installer configuration, supported profiles,
-and the nix-csi comparison. Actors keep their independent `nix:/...` interface;
-Kubernetes pods use snapshotter `nix:0...` references. No conventional OCI
-application images need to be built, pushed, or pulled. Snapshotter still
-uses OCI configuration archives and small filesystem descriptors internally,
-and Kubernetes/bootstrap assets must be provisioned separately.
 
 ## Documentation
 
@@ -103,9 +60,11 @@ New here? Start with [docs/README.md](docs/README.md).
 | [Concepts](docs/concepts.md) | Agent Substrate and Nix in plain words. All terms defined. |
 | [Getting started](docs/getting-started.md) | Build the packages, with Nix or with Docker only. Use the flake from your own. |
 | [Nix images](docs/nix-images.md) | How a store path becomes a running actor. Build and publish an image. |
-| [Run it on your cluster](docs/operating.md) | Node setup, the two patched components, trust. |
+| [Install on your cluster](docs/install.md) | Install Substrate on a Kubernetes cluster that is not GKE: prerequisites, images, snapshot storage, deploy. |
+| [Enable Nix images](docs/operating.md) | Node setup, the two patched components, trust, revocation. |
 | [Proof on kind](kind/README.md) | The full local proof, step by step. |
 | [Reference project](examples/reference/README.md) | A dev shell, an app, an agent image and a runtime image from one lock file. |
+| [OMP example](examples/omp/README.md) | A coding agent in a Nix image, used through the remote terminal. |
 | [PTY streams](docs/pty.md) | The remote terminal. |
 | [What is proven](docs/proof.md) | Tested and not tested. |
 | [Troubleshooting](docs/troubleshooting.md) | Errors, causes, fixes. |

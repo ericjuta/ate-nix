@@ -71,7 +71,7 @@ A **view** is the directory that atelet builds for one Nix image. It contains ha
 
 **PTY streams** are independent of Nix images. A PTY (pseudo-terminal) is what makes a remote shell behave like a local one: full-screen programs, colours, window resize. Upstream `ate-env` runs a command and returns its output. With the patch, it can also attach your terminal to the remote command. See [pty.md](pty.md).
 
-**Pod images** use a different path. Kubernetes starts Substrate's own services and
+**Pod images** are a separate, optional feature. An actor is not a Kubernetes pod, but Substrate's own services and workers are, and normally they come from a container registry too. The paragraph below says how they can come from a Nix cache instead. Kubernetes starts Substrate's own services and
 workers through containerd; actors are started by atelet. The optional
 nix-snapshotter module lets containerd realize signed closures from a Nix cache
 using `nix:0...` archive references. These archives retain OCI image configuration
@@ -79,6 +79,23 @@ and small directory/mountpoint layers, not conventional application image layers
 fetched from a registry. The installer image map keeps pod references separate
 from actors' `nix:/...` roots. See [nix-images.md](nix-images.md#registry-free-substrate-system-pods)
 for publication, bootstrap requirements, and supported deployments.
+
+## Other names you will meet
+
+These are not needed for the short path. Come back when a page uses one.
+
+| Term | Meaning |
+| --- | --- |
+| **kind** | "Kubernetes in Docker": a tool that runs a throwaway Kubernetes cluster in Docker containers on one machine. The local proof uses it. |
+| **GKE** | Google Kubernetes Engine. The upstream installer assumes it, or kind. |
+| **gVisor**, **microVM** | The two sandbox types of Substrate. gVisor needs no hardware support. A microVM needs KVM (`/dev/kvm`). All cluster tests here used gVisor. |
+| **containerd** | The program on a Kubernetes node that starts containers for pods. Substrate's own services and workers are pods, so containerd starts them. It does not start actors: atelet does. |
+| **ko** | A tool that builds Go programs into container images. Upstream Substrate builds its images with it. In images built that way, the program is at `/ko-app/<name>`. |
+| **narinfo** | The small text file that a binary cache holds for each store path: its content hash, its size, the paths it needs, and its signatures. A node reads the narinfo before it downloads the path. |
+| **nix-snapshotter** | A containerd plugin from another project. With it, containerd can start a pod from a Nix closure instead of image layers. This repository uses it only for the registry-free system pods. |
+| **nix-csi** | A different project with a similar aim: it gives a pod a Nix closure as a volume. This repository does not use it. [nix-images.md](nix-images.md#why-nix-snapshotter-rather-than-nix-csi) compares the two. |
+| **Image map** | A file for the installer that says, for each Substrate component, which image reference to deploy. The registry-free path generates one that points at Nix closures. |
+| **OMP** | [Oh My Pi](https://github.com/can1357/oh-my-pi), an open-source coding agent that runs in a terminal. This repository packages it as an example of a real agent in a Nix image. |
 
 ## How the repository is built
 
