@@ -53,11 +53,18 @@ jobs:
           shellcheck --severity=style .github/*.sh
           .github/ci-scope.sh
       # The registry-free closure bundle and its node VM test need more disk
-      # than a hosted runner has free; remove preinstalled toolchains that
-      # this job does not use.
+      # than a 72 GB hosted runner had free. The current image has 145 GB with
+      # 86 to 107 GB free, and removing the toolchains took 74 to 315 s of every
+      # run. Remove them only when the runner has less room than that.
       - name: Free runner disk space
         if: steps.scope.outputs.nix == 'true'
         run: |
+          df -h /
+          avail=$(df --output=avail -BG / | tail -1 | tr -dc 0-9)
+          if [ "$avail" -ge 80 ]; then
+            echo "$avail GB free: nothing to remove"
+            exit 0
+          fi
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
             /usr/local/.ghcup /opt/hostedtoolcache /usr/share/swift \
             /usr/local/share/powershell /usr/local/share/chromium \
@@ -123,6 +130,9 @@ jobs:
       - name: Build the private-cache proof images
         if: steps.scope.outputs.nix == 'true'
         run: nix build -L --impure --file kind/private-images.nix --argstr nonce ci signed unsigned rogue
+      - name: Show disk use
+        if: always()
+        run: df -h /
       - name: Copy what this run built into the cache
         # An archive with this exact key exists already; nothing would be saved.
         if: steps.scope.outputs.nix == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
