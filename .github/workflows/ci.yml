@@ -32,7 +32,7 @@ jobs:
     timeout-minutes: 180
     permissions:
       contents: read
-      actions: read
+      actions: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -140,6 +140,12 @@ jobs:
           # The Nix daemon creates the directory as root when no archive was restored.
           sudo chown -R "$(id -u)" ~/nix-cache
           .github/save-nix-cache.sh ~/nix-cache
+      # Deleting first leaves room for the other system's archive.
+      - name: Delete this system's older archives
+        if: steps.scope.outputs.nix == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/prune-nix-cache.sh "${{ matrix.system }}" "nix-cache-${{ matrix.system }}-${{ hashFiles('**/*.nix', '**/flake.lock', 'patches/**') }}"
       - name: Save the cache
         if: steps.scope.outputs.nix == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
