@@ -8,9 +8,12 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request replaces its run. A push to main waits for the
+# run before it instead: a cancelled main run never saves the Nix cache, so the
+# next one would compile everything again.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
