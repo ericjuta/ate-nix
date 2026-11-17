@@ -69,12 +69,8 @@ jobs:
       # A binary cache of what earlier runs built, kept as one archive in the
       # repository's GitHub Actions cache, so a run compiles only what changed.
       # A new archive is saved when a Nix file, lock file or patch changes.
-      - id: cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/nix-cache
-          key: nix-cache-${{ matrix.system }}-${{ hashFiles('**/*.nix', '**/flake.lock', 'patches/**') }}
-          restore-keys: nix-cache-${{ matrix.system }}-
+      # VALIDATION BRANCH, NOT FOR MERGE: no cache restore or save, to measure a
+      # cold build without the disk cleanup.
       - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
         with:
           extra_nix_config: |
@@ -106,7 +102,7 @@ jobs:
         run: df -h /
       - name: Copy what this run built into the cache
         # An archive with this exact key exists already; nothing would be saved.
-        if: steps.cache.outputs.cache-hit != 'true'
+        if: false
         run: |
           # The Nix daemon creates the directory as root when no archive was restored.
           sudo chown -R "$(id -u)" ~/nix-cache
