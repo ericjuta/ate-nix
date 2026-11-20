@@ -1,6 +1,6 @@
 # Enable Nix images on your cluster
 
-Let actors start from `image: nix:/nix/store/...` on a cluster that already runs Agent Substrate v1.0.0.
+Let actors start from `image: nix:/nix/store/...` on a cluster that already runs Agent Substrate v1.0.1.
 There are three steps: prepare each node, replace two components, and give one of them the Nix store.
 
 - No Substrate yet, on your own cluster: install it first with [install.md](install.md).
@@ -8,7 +8,7 @@ There are three steps: prepare each node, replace two components, and give one o
 
 ## Requirements
 
-- A cluster that runs Substrate v1.0.0.
+- A cluster that runs Substrate v1.0.1.
 - Nix on each node that runs Nix images. NixOS is not required: any Linux distribution with a Nix installation works.
 - A binary cache that the nodes can reach, and its public signing key. For packages from the public Nix package set, `cache.nixos.org` is enough.
 
@@ -101,19 +101,19 @@ changes, so skip the image replacement if you installed that release.
 Build the images, then push them to a registry that your nodes can pull from:
 
 ```sh
-nix build .#atelet-image && docker load < result    # ate-nix/atelet:1.0.0
-nix build .#ateapi-image && docker load < result    # ate-nix/ateapi:1.0.0
+nix build .#atelet-image && docker load < result    # ate-nix/atelet:1.0.1
+nix build .#ateapi-image && docker load < result    # ate-nix/ateapi:1.0.1
 for i in atelet ateapi; do
-  docker tag ate-nix/$i:1.0.0 <registry>/ate-nix/$i:1.0.0
-  docker push <registry>/ate-nix/$i:1.0.0
+  docker tag ate-nix/$i:1.0.1 <registry>/ate-nix/$i:1.0.1
+  docker push <registry>/ate-nix/$i:1.0.1
 done
 ```
 
 The images use the same layout as the upstream images (`/ko-app/<name>`), so only the image reference changes:
 
 ```sh
-kubectl -n ate-system set image ds/atelet atelet=<registry>/ate-nix/atelet:1.0.0
-kubectl -n ate-system set image deploy/ate-api-server ate-api-server=<registry>/ate-nix/ateapi:1.0.0
+kubectl -n ate-system set image ds/atelet atelet=<registry>/ate-nix/atelet:1.0.1
+kubectl -n ate-system set image deploy/ate-api-server ate-api-server=<registry>/ate-nix/ateapi:1.0.1
 ```
 
 One difference from upstream: the atelet image has no C library. Upstream's has one so that atelet can run a dynamically linked kubelet credential provider for OCI pulls from a private registry (GKE Ubuntu, AKS). On such a node, pull OCI images from registries that need no credential provider, or build atelet on upstream's base image.

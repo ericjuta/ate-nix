@@ -37,7 +37,9 @@ let
     cp -R ${src}/. source
     chmod -R u+w source
     cd source
-    export HOME="$TMPDIR" GOCACHE="$TMPDIR/go-cache" GOPROXY=off GOSUMDB=off
+    # Substrate's go.mod suggests a newer patch toolchain than nixpkgs has. Use
+    # the pinned compiler, as buildGoModule does; the `go` line is the minimum.
+    export HOME="$TMPDIR" GOCACHE="$TMPDIR/go-cache" GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local
     export CGO_ENABLED=0 GOFLAGS=-mod=vendor ATE_TEST_IMAGE_MAP=${imageMap}
     go test ./cmd/ate-setup/internal/images > "$out" 2>&1 || {
       cat "$out" >&2
@@ -55,7 +57,7 @@ let
       cp -R ${src}/. "$work/"
       chmod -R u+w "$work"
       cd "$work"
-      export CGO_ENABLED=0 GOCACHE="$work/go-cache" GOPROXY=off GOSUMDB=off GOFLAGS=-mod=vendor
+      export CGO_ENABLED=0 GOCACHE="$work/go-cache" GOPROXY=off GOSUMDB=off GOFLAGS=-mod=vendor GOTOOLCHAIN=local
       export ATE_TEST_IMAGE_MAP=${imageMap}
       git init --initial-branch=build
       git add --force --all

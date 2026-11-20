@@ -6,6 +6,7 @@ A feature is listed as proven only if someone ran it and saw the result. All oth
 
 Proven on 2026-11-13 on a single-node [kind](https://kind.sigs.k8s.io) cluster: Kubernetes v1.37.0, gVisor workers, a Debian node with Nix 2.35.6, and the two container images from this repository.
 [../kind/README.md](../kind/README.md) has the steps to repeat it. `kind/prove.sh` and `kind/private-cache.sh` are the checks.
+Both checks passed again on 2026-11-20 after the move to Substrate v1.0.1, on the same kind of cluster with `ate-nix/atelet:1.0.1` and `ate-nix/ateapi:1.0.1`. That run repeated the rows that the two scripts cover; the derivation refusal and the `cache.nixos.org` download were not repeated.
 
 | Claim | Evidence |
 | --- | --- |

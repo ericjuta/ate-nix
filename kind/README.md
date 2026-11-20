@@ -36,11 +36,11 @@ ls "$OUT"; echo "$PROOF_IMAGE"
 
 ## 2. Cluster
 
-Get upstream Substrate at `v1.0.0` and work in that checkout:
+Get upstream Substrate at `v1.0.1` and work in that checkout:
 
 ```sh
 export SUBSTRATE=/tmp/ate-nix-substrate
-git clone --branch v1.0.0 --depth 1 https://github.com/agent-substrate/substrate "$SUBSTRATE"
+git clone --branch v1.0.1 --depth 1 https://github.com/agent-substrate/substrate "$SUBSTRATE"
 cd "$SUBSTRATE"
 git apply "$ATE_NIX/kind/create-kind-cluster.patch"   # mounts the volume into the node as /nix
 export KIND_CLUSTER_NAME=ate-nix ATE_INSTALL_KIND=true BUILDX_BUILDER=default
@@ -74,8 +74,8 @@ In this repository. Load the two tarballs of step 1 into the kind node, then swi
 (cd "$SUBSTRATE" && hack/kind.sh load image-archive "$OUT"/*-ateapi.tar.gz --name ate-nix)
 k() { kubectl --context kind-ate-nix -n ate-system "$@"; }
 k patch ds atelet --type=json --patch-file kind/atelet-nix.patch.json
-k set image ds/atelet atelet=docker.io/ate-nix/atelet:1.0.0
-k set image deploy/ate-api-server ate-api-server=docker.io/ate-nix/ateapi:1.0.0
+k set image ds/atelet atelet=docker.io/ate-nix/atelet:1.0.1
+k set image deploy/ate-api-server ate-api-server=docker.io/ate-nix/ateapi:1.0.1
 k rollout status ds/atelet && k rollout status deploy/ate-api-server
 ```
 
