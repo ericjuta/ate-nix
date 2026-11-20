@@ -71,7 +71,7 @@ Use the store path that ends in `-ate-env-...`. The programs are statically link
 | Output | What it is |
 | --- | --- |
 | `.#ate-env` (default) | `ate-env`, `ate-env-api`, `ate-env-guest` with PTY streams. See [pty.md](pty.md). |
-| `.#ate-substrate` | `atelet`, `ateapi`, `ate-setup`, and `kubectl-ate` from patched Substrate v1.0.0. The installer supports `--existing-cluster`; see [install.md](install.md). |
+| `.#ate-substrate` | `atelet`, `ateapi`, `ate-setup`, and `kubectl-ate` from patched Substrate v1.0.1. The installer supports `--existing-cluster`; see [install.md](install.md). |
 | `.#ate-substrate.patchedSrc` | The exact patched source and runtime resources, including the worker overlayfs compatibility patch. Use this source to publish a complete OCI release, not just the two binary images below. |
 | `.#atelet-image`, `.#ateapi-image` | Container images of those two binaries, as `docker load` tarballs. Linux only. |
 | `.#ate-env-api-image` | Container image of the patched `ate-env-api`, as a `docker load` tarball. Linux only. |

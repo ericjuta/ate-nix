@@ -10,14 +10,14 @@
 }:
 
 let
-  version = "1.0.0";
+  version = "1.0.1";
   patchedSrc = applyPatches {
     name = "ate-substrate-${version}-src";
     src = fetchFromGitHub {
       owner = "agent-substrate";
       repo = "substrate";
-      rev = "b34fbee742906494b5eb4f1f36987176bf8770a4"; # v1.0.0
-      hash = "sha256-smq4+HxT7vaqhomfTGCIa3ndq1UqsfMKON4DVhTl/o0=";
+      rev = "20778a6dbb01f13024642851bb592bf67c9fec05"; # v1.0.1
+      hash = "sha256-8qZR+bOdCLEMBMFID/XQmZ7LwkyZUlRmHIsdSYd2q6k=";
     };
     patches = [
       ../patches/substrate/0001-atelet-nix-image-source.patch

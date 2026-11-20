@@ -3,7 +3,7 @@
 How store paths become running actors and Kubernetes system pods, and how to publish them without a container registry.
 Read [concepts.md](concepts.md) first if "closure" or "binary cache" is new to you.
 
-The actor interface remains `patches/substrate/0001-atelet-nix-image-source.patch` on Substrate v1.0.0. It also adds `docs/guides/nix-images.md` to the pinned source.
+The actor interface remains `patches/substrate/0001-atelet-nix-image-source.patch` on Substrate v1.0.1. It also adds `docs/guides/nix-images.md` to the pinned source.
 System pods use the separate [registry-free Substrate integration](#registry-free-substrate-system-pods) below; these two reference formats are not interchangeable.
 
 ## The reference

@@ -18,7 +18,7 @@ pkgs.callPackage ./pkgs/omp-image.nix {
 
 The image uses this repository's existing `ateNixImage` builder and `nix:/nix/store/...` image format. It is not an OCI archive and is not a `nix:0...` reference. Build for the worker's Linux architecture, not the machine running your terminal.
 
-The env package remains pinned to [`56424de763f91daa6b6c38f6249bacef1d82e5e1`](https://github.com/agent-substrate/env/tree/56424de763f91daa6b6c38f6249bacef1d82e5e1), with the existing dependency update to Substrate v1.0.0 plus PTY, router TLS rotation, and process-stream recovery patches. [PTY documentation](../../docs/pty.md) describes the patch order and behavior.
+The env package remains pinned to [`56424de763f91daa6b6c38f6249bacef1d82e5e1`](https://github.com/agent-substrate/env/tree/56424de763f91daa6b6c38f6249bacef1d82e5e1), with the existing dependency update to Substrate v1.0.1 plus PTY, router TLS rotation, and process-stream recovery patches. [PTY documentation](../../docs/pty.md) describes the patch order and behavior.
 
 ## Required cluster setup
 

@@ -109,7 +109,7 @@ ATE_NIX="$PWD"
 ATE_PACKAGE="$(nix build --no-link --print-out-paths .#ate-substrate)"
 PATCHED_SRC="$(nix build --no-link --print-out-paths .#ate-substrate.patchedSrc)"
 IMAGE_REPO=registry.example.com/substrate
-IMAGE_TAG=v1.0.0-ate-nix
+IMAGE_TAG=v1.0.1-ate-nix
 BUILD_DIR="$(mktemp -d)"
 
 # Publish from a writable copy, retaining every manifest, .ko.yaml, ko module,
@@ -121,7 +121,7 @@ chmod -R u+w "$BUILD_DIR"
 # provenance from a real commit; this records the full patched snapshot.
 git -C "$BUILD_DIR" init --initial-branch=build
 git -C "$BUILD_DIR" add --force --all
-git -C "$BUILD_DIR" commit -m "Snapshot ate-nix patched Substrate v1.0.0"
+git -C "$BUILD_DIR" commit -m "Snapshot ate-nix patched Substrate v1.0.1"
 
 # The package's development environment supplies its pinned Go 1.27 toolchain.
 # Docker/buildx and registry credentials remain those of the publishing host.
@@ -216,7 +216,7 @@ existingCluster:
 context: your-existing-context
 images:
   repo: registry.example.com/substrate
-  tag: v1.0.0-ate-nix
+  tag: v1.0.1-ate-nix
 storage:
   bucketName: substrate-snapshots
   snapshotLocation: s3://substrate-snapshots/snapshots/

@@ -19,7 +19,7 @@ The package applies these patches in order to env `56424de763f91daa6b6c38f6249ba
 | Patch | Purpose |
 | --- | --- |
 | `0001-pty-process-streams.patch` | Samuel Huber's PTY extension, rebased with ate-nix's terminal-restoration fix. |
-| `0002-substrate-v1.0.0.patch` | The existing `go.mod`/`go.sum` update to Substrate v1.0.0. |
+| `0002-substrate-v1.0.1.patch` | The existing `go.mod`/`go.sum` update to Substrate v1.0.1. |
 | `0003-free-slot-before-exit.patch` | The guest frees a process slot before it reports the exit. |
 | `0004-router-tls-rotation.patch` | Samuel Huber's generic client-certificate and router trust-bundle rotation changes and tests. |
 | `0005-resume-cut-process-streams.patch` | Samuel Huber's generic process-stream recovery changes and tests, adapted to retain ate-nix's exit-code handling. |
