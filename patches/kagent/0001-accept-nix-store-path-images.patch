@@ -1,0 +1,123 @@
+kagent: accept Nix store-path images
+
+Base: kagent-dev/kagent v1.0.1 (558e3d761d8ed2b0d23bfef1867a9d1915210121).
+
+kagent requires every Harness, SandboxTemplate and Agent workload image to be
+an OCI reference pinned by sha256 digest. A Substrate patched by ate-nix also
+runs `nix:/nix/store/<hash>-<name>`, which is immutable in the same way: the
+hash in the name covers the build inputs. This lets that form through the one
+Go check and the three CRD patterns that would refuse it.
+
+diff --git a/go/api/v1alpha3/agent_types.go b/go/api/v1alpha3/agent_types.go
+index 76ffc37..cdc565f 100644
+--- a/go/api/v1alpha3/agent_types.go
++++ b/go/api/v1alpha3/agent_types.go
+@@ -99,7 +99,7 @@ type AgentStatus struct {
+ 	LatestSuccessfulRevision string `json:"latestSuccessfulRevision,omitempty"`
+ 	// WorkloadImage is the digest-pinned image selected for the desired revision.
+ 	// Existing Sessions may still use an older revision and image.
+-	// +kubebuilder:validation:Pattern=`^[^[:space:]@]+@sha256:[a-f0-9]{64}$`
++	// +kubebuilder:validation:Pattern=`^([^[:space:]@]+@sha256:[a-f0-9]{64}|nix:/nix/store/[0-9a-z]{32}-[^[:space:]/]+)$`
+ 	// +optional
+ 	WorkloadImage *string `json:"workloadImage,omitempty"`
+ 	// Warnings reports non-blocking compatibility decisions made while compiling
+diff --git a/go/api/v1alpha3/harness_types.go b/go/api/v1alpha3/harness_types.go
+index fac0a24..2c394f7 100644
+--- a/go/api/v1alpha3/harness_types.go
++++ b/go/api/v1alpha3/harness_types.go
+@@ -113,7 +113,7 @@ type BYOHarness struct{}
+ type HarnessWorkload struct {
+ 	// Image overrides the release's built-in runtime image. BYO requires an image.
+ 	// When set, it must be an OCI image reference pinned by sha256 digest.
+-	// +kubebuilder:validation:Pattern=`^[^[:space:]@]+@sha256:[a-f0-9]{64}$`
++	// +kubebuilder:validation:Pattern=`^([^[:space:]@]+@sha256:[a-f0-9]{64}|nix:/nix/store/[0-9a-z]{32}-[^[:space:]/]+)$`
+ 	// +optional
+ 	Image *string `json:"image,omitempty"`
+ 
+diff --git a/go/api/v1alpha3/sandboxtemplate_types.go b/go/api/v1alpha3/sandboxtemplate_types.go
+index 0b563f7..078b193 100644
+--- a/go/api/v1alpha3/sandboxtemplate_types.go
++++ b/go/api/v1alpha3/sandboxtemplate_types.go
+@@ -15,7 +15,7 @@ const SandboxTemplateKind = "SandboxTemplate"
+ // or guest entrypoint. The consumer owns startup.
+ type SandboxTemplateWorkload struct {
+ 	// Image is an OCI image reference pinned by sha256 digest.
+-	// +kubebuilder:validation:Pattern=`^[^[:space:]@]+@sha256:[a-f0-9]{64}$`
++	// +kubebuilder:validation:Pattern=`^([^[:space:]@]+@sha256:[a-f0-9]{64}|nix:/nix/store/[0-9a-z]{32}-[^[:space:]/]+)$`
+ 	// +required
+ 	Image string `json:"image"`
+ }
+diff --git a/go/core/internal/image/validation.go b/go/core/internal/image/validation.go
+index a59ffb1..8bc86e9 100644
+--- a/go/core/internal/image/validation.go
++++ b/go/core/internal/image/validation.go
+@@ -2,9 +2,12 @@ package image
+ 
+ import "regexp"
+ 
+-var digestPinned = regexp.MustCompile(`^[^[:space:]@]+@sha256:[a-f0-9]{64}$`)
++// A Nix store path is content-addressed by its hash prefix, so ate-nix's
++// `nix:/nix/store/<hash>-<name>` reference is as immutable as an OCI digest.
++var digestPinned = regexp.MustCompile(`^([^[:space:]@]+@sha256:[a-f0-9]{64}|nix:/nix/store/[0-9a-z]{32}-[^[:space:]/]+)$`)
+ 
+-// IsDigestPinned reports whether reference names an image pinned by SHA-256 digest.
++// IsDigestPinned reports whether reference names an immutable image: an OCI
++// reference pinned by SHA-256 digest, or a Nix store path.
+ func IsDigestPinned(reference string) bool {
+ 	return digestPinned.MatchString(reference)
+ }
+diff --git a/go/core/internal/image/validation_test.go b/go/core/internal/image/validation_test.go
+index 35cc2d4..6bb2e00 100644
+--- a/go/core/internal/image/validation_test.go
++++ b/go/core/internal/image/validation_test.go
+@@ -25,6 +25,11 @@ func TestIsDigestPinned(t *testing.T) {
+ 		{"short digest", "registry/image" + digest[:len(digest)-1], false},
+ 		{"uppercase digest", "registry/image@sha256:" + strings.Repeat("A", 64), false},
+ 		{"multiple digests", "registry/image" + digest + digest, false},
++		{"nix store path", "nix:/nix/store/vhsw86idhxar7mgdsj2al0xa6isdzdqa-kagent-adk-nix-image", true},
++		{"nix path outside the store", "nix:/tmp/vhsw86idhxar7mgdsj2al0xa6isdzdqa-image", false},
++		{"nix short hash", "nix:/nix/store/vhsw86idhxar7mgdsj2al0xa6isdzdq-image", false},
++		{"nix path below a store path", "nix:/nix/store/vhsw86idhxar7mgdsj2al0xa6isdzdqa-image/bin", false},
++		{"nix store path without scheme", "/nix/store/vhsw86idhxar7mgdsj2al0xa6isdzdqa-image", false},
+ 	} {
+ 		t.Run(tt.name, func(t *testing.T) {
+ 			require.Equal(t, tt.want, image.IsDigestPinned(tt.reference))
+diff --git a/helm/kagent-crds/templates/api.kagent.dev_agents.yaml b/helm/kagent-crds/templates/api.kagent.dev_agents.yaml
+index 4ff456d..4043333 100644
+--- a/helm/kagent-crds/templates/api.kagent.dev_agents.yaml
++++ b/helm/kagent-crds/templates/api.kagent.dev_agents.yaml
+@@ -626,7 +626,7 @@ spec:
+                 description: |-
+                   WorkloadImage is the digest-pinned image selected for the desired revision.
+                   Existing Sessions may still use an older revision and image.
+-                pattern: ^[^[:space:]@]+@sha256:[a-f0-9]{64}$
++                pattern: ^([^[:space:]@]+@sha256:[a-f0-9]{64}|nix:/nix/store/[0-9a-z]{32}-[^[:space:]/]+)$
+                 type: string
+             type: object
+         required:
+diff --git a/helm/kagent-crds/templates/api.kagent.dev_harnesses.yaml b/helm/kagent-crds/templates/api.kagent.dev_harnesses.yaml
+index 6a28339..4d28adf 100644
+--- a/helm/kagent-crds/templates/api.kagent.dev_harnesses.yaml
++++ b/helm/kagent-crds/templates/api.kagent.dev_harnesses.yaml
+@@ -245,7 +245,7 @@ spec:
+                     description: |-
+                       Image overrides the release's built-in runtime image. BYO requires an image.
+                       When set, it must be an OCI image reference pinned by sha256 digest.
+-                    pattern: ^[^[:space:]@]+@sha256:[a-f0-9]{64}$
++                    pattern: ^([^[:space:]@]+@sha256:[a-f0-9]{64}|nix:/nix/store/[0-9a-z]{32}-[^[:space:]/]+)$
+                     type: string
+                 type: object
+             required:
+diff --git a/helm/kagent-crds/templates/api.kagent.dev_sandboxtemplates.yaml b/helm/kagent-crds/templates/api.kagent.dev_sandboxtemplates.yaml
+index bf2fd95..e6a2f14 100644
+--- a/helm/kagent-crds/templates/api.kagent.dev_sandboxtemplates.yaml
++++ b/helm/kagent-crds/templates/api.kagent.dev_sandboxtemplates.yaml
+@@ -146,7 +146,7 @@ spec:
+                   image:
+                     description: Image is an OCI image reference pinned by sha256
+                       digest.
+-                    pattern: ^[^[:space:]@]+@sha256:[a-f0-9]{64}$
++                    pattern: ^([^[:space:]@]+@sha256:[a-f0-9]{64}|nix:/nix/store/[0-9a-z]{32}-[^[:space:]/]+)$
+                     type: string
+                 required:
+                 - image

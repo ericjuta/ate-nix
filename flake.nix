@@ -25,6 +25,7 @@
         ate-substrate = final.callPackage ./pkgs/ate-substrate.nix { };
         ateNixImage = final.callPackage ./pkgs/ate-nix-image.nix { };
         ateImages = final.callPackage ./pkgs/ate-images.nix { };
+        ateKagent = final.callPackage ./pkgs/kagent.nix { };
         ateNixSnapshotter = import ./pkgs/nix-snapshotter { pkgs = final; };
         ateRegistryFree = import ./pkgs/registry-free-substrate {
           pkgs = final;
@@ -144,6 +145,14 @@
         atelet-image = (pkgsFor system).ateImages.atelet;
         ateapi-image = (pkgsFor system).ateImages.ateapi;
         ate-env-api-image = (pkgsFor system).ateImages.ate-env-api;
+
+        # kagent on a Substrate that runs Nix images: docs/kagent.md.
+        kagent = (pkgsFor system).ateKagent.kagent;
+        kagent-substrate = (pkgsFor system).ateKagent.substrate;
+        kagent-adk-image = (pkgsFor system).ateKagent.adkImage;
+        kagent-controller-image = (pkgsFor system).ateKagent.controllerImage;
+        kagent-atelet-image = (pkgsFor system).ateKagent.ateletImage;
+        kagent-ateapi-image = (pkgsFor system).ateKagent.ateapiImage;
       });
 
       # `nix flake check` builds these for the current system. Building a
@@ -173,8 +182,8 @@
               ''
                 cd ${./kind}
                 sh -n node-setup.sh
-                bash -n prove.sh private-cache.sh
-                shellcheck --severity=warning node-setup.sh prove.sh private-cache.sh
+                bash -n prove.sh private-cache.sh kagent.sh
+                shellcheck --severity=warning node-setup.sh prove.sh private-cache.sh kagent.sh
                 jq empty atelet-nix.patch.json
                 touch $out
               '';

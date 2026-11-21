@@ -9,6 +9,9 @@ to, and build instructions for, these projects:
   Apache License 2.0, copyright its authors.
 - Agent Substrate Environment (https://github.com/agent-substrate/env),
   Apache License 2.0, copyright its authors.
+- kagent (https://github.com/kagent-dev/kagent) and its Agent Substrate fork
+  (https://github.com/kagent-dev/substrate), Apache License 2.0, copyright
+  their authors.
 
 patches/env/0001-pty-process-streams.patch is a rebased form of a patch by
 Samuel Huber:
@@ -21,4 +24,8 @@ Apache License 2.0, the same terms as his other contributions here.
 patches/substrate/0001-atelet-nix-image-source.patch was written for this
 repository. It follows an idea by Samuel Huber. It is not his code.
 
-This project is not affiliated with Agent Substrate or its maintainers.
+patches/kagent/0001-accept-nix-store-path-images.patch was written for this
+repository.
+
+This project is not affiliated with Agent Substrate, kagent or their
+maintainers.
