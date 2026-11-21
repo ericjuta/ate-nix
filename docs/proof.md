@@ -39,6 +39,7 @@ Also proven, without a cluster: the Go unit tests of the patch pass, and the Nix
 ## kagent on Nix images
 
 Proven on 2026-11-21 on a single-node kind cluster (`x86_64`, gVisor workers): a kagent `v1.0.1` Agent booted from a Nix store path on kagent's Substrate fork `v1.0.0`, answered through a real model, ran its `bash` tool inside the Nix image, saw exactly the 23 store paths of its closure, and answered again after a suspend. Every patched component came from this flake.
+On a second cluster the same day, a kagent `SandboxTemplate` on the same store path was prepared, a sandbox from it ran commands inside the Nix image with kagent's OCI guest mounted into it, and its files survived a suspend.
 [kagent.md](kagent.md#what-was-seen) has the evidence row by row and the list of what was not seen. CI builds the kagent packages and runs the unit test of the patched image check; it starts no cluster.
 
 ## Portable installer and node compatibility
