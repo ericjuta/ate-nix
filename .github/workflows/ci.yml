@@ -92,14 +92,17 @@ jobs:
       # A binary cache of what earlier runs built, kept as one archive in the
       # repository's GitHub Actions cache, so a run compiles only what changed.
       # Every run restores it; only a push to main saves a new one, when a Nix
-      # file, lock file or patch changes. A pull request that saved its own
+      # file, lock file, patch or the save script changes. `nix flake check`
+      # does not download a check that a cache already holds, so the save
+      # script keeps such entries from the restored archive instead of
+      # reading them from the local store. A pull request that saved its own
       # 9 GB of archives would push main's out of the repository's 10 GB limit.
       - id: cache
         if: steps.scope.outputs.nix == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/nix-cache
-          key: nix-cache-${{ matrix.system }}-${{ hashFiles('**/*.nix', '**/flake.lock', 'patches/**') }}
+          key: nix-cache-${{ matrix.system }}-${{ hashFiles('**/*.nix', '**/flake.lock', 'patches/**', '.github/save-nix-cache.sh') }}
           restore-keys: nix-cache-${{ matrix.system }}-
       - if: steps.scope.outputs.nix == 'true'
         uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
@@ -145,10 +148,10 @@ jobs:
         if: steps.scope.outputs.nix == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: .github/prune-nix-cache.sh "${{ matrix.system }}" "nix-cache-${{ matrix.system }}-${{ hashFiles('**/*.nix', '**/flake.lock', 'patches/**') }}"
+        run: .github/prune-nix-cache.sh "${{ matrix.system }}" "nix-cache-${{ matrix.system }}-${{ hashFiles('**/*.nix', '**/flake.lock', 'patches/**', '.github/save-nix-cache.sh') }}"
       - name: Save the cache
         if: steps.scope.outputs.nix == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/nix-cache
-          key: nix-cache-${{ matrix.system }}-${{ hashFiles('**/*.nix', '**/flake.lock', 'patches/**') }}
+          key: nix-cache-${{ matrix.system }}-${{ hashFiles('**/*.nix', '**/flake.lock', 'patches/**', '.github/save-nix-cache.sh') }}
