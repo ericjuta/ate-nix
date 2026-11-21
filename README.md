@@ -14,6 +14,7 @@ New to Agent Substrate or Nix? [docs/README.md](docs/README.md) explains both fr
 | **Install Substrate on a cluster that you already have.** Upstream's installer targets Google's GKE or a local test cluster. | `ate-setup deploy --existing-cluster` | [docs/install.md](docs/install.md) |
 | **Run Substrate's own pods from a Nix cache too**, with no container registry. Optional. | `nix build .#substrate-nix-bundle`, then `ate-setup --image-map` | [docs/nix-images.md](docs/nix-images.md#registry-free-substrate-system-pods) |
 | **Run a real coding agent in an actor.** A worked example with [Oh My Pi](https://github.com/can1357/oh-my-pi) (OMP). It contains no credentials. | `nix build .#omp-image`, then `ate-env <id> shell --tty omp` | [examples/omp](examples/omp/README.md) |
+| **Start a [kagent](https://kagent.dev) agent from a Nix store path.** kagent runs its agents on its own Substrate fork; the same patches apply to it. A local proof, not a supported integration. | `nix build .#kagent-adk-image`, then a kagent `Harness` with `image: nix:...` | [docs/kagent.md](docs/kagent.md) |
 
 Each row is usable without the others.
 

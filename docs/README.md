@@ -14,6 +14,8 @@ This repository adds four things through patches and packages on top of pinned u
 
 There is also one worked example: the [OMP](https://github.com/can1357/oh-my-pi) coding agent packaged as a Nix image, which you drive through the remote terminal.
 
+And one proof of stacking: [kagent](https://kagent.dev), an agent framework that runs on its own Substrate fork, starting an agent from a Nix image. The same patches apply to that fork.
+
 Nothing here is a fork. Upstream source is fetched by hash, the patches are applied at build time, and Nix builds the result.
 
 This project is not affiliated with Agent Substrate. It is experimental: read [proof.md](proof.md) before you depend on it.
@@ -28,6 +30,7 @@ This project is not affiliated with Agent Substrate. It is experimental: read [p
 | Install Substrate on your own cluster (not GKE, not kind) | [install.md](install.md) |
 | Enable Nix images on a cluster that runs Substrate | [operating.md](operating.md) |
 | Run a real coding agent (OMP) in an actor | [../examples/omp/README.md](../examples/omp/README.md) |
+| Start a kagent agent from a Nix image | [kagent.md](kagent.md) |
 | Deploy supported system pods without a container registry; compare nix-csi and nix-snapshotter | [nix-images.md](nix-images.md#registry-free-substrate-system-pods) |
 | See it work on a local throwaway cluster | [../kind/README.md](../kind/README.md) |
 | Start your own project on top of it | [../examples/reference/README.md](../examples/reference/README.md) |

@@ -12,11 +12,13 @@ pkgs/
   ate-nix-image.nix       ateNixImage: builds a Nix image root
   omp-image.nix           generic OMP actor image with the env guest
   ate-images.nix          container images of atelet and ateapi
+  kagent.nix              kagent and its Substrate fork: pins + patches/kagent, patches/substrate
   nix-snapshotter/        pinned snapshotter, pause archive, containerd VM check
   registry-free-substrate/ closure-backed pod packages, actor roots and image map
 patches/
   env/                    applied to agent-substrate/env
-  substrate/              applied to agent-substrate/substrate
+  substrate/              applied to agent-substrate/substrate, and to kagent's fork of it
+  kagent/                 applied to kagent-dev/kagent
   nix-snapshotter/         generic upstream snapshotter fixes
 modules/ate-node.nix      NixOS module for an actor node
 modules/nix-snapshotter.nix optional standalone containerd/kubelet integration
@@ -38,6 +40,8 @@ No upstream code is stored here. Each `pkgs/*.nix` file names an upstream commit
 | Original PTY patch | <https://gist.github.com/SamuelLHuber/5d420731d5d6bbd034daa8f02eae9b96> at revision `a625acf1ae16dcc8015d10fed76cf7bd1a75d010` |
 | nix-snapshotter | `v0.4.0`; source and globset dependency hashes in `pkgs/nix-snapshotter/default.nix` |
 | Oh My Pi | `18.20.2`, commit `7c49c11aa5bbaf3f418406583096168ad5b8c6dc`; upstream flake retains its own toolchain pins |
+| `kagent-dev/kagent` | `v1.0.1`, commit `558e3d761d8ed2b0d23bfef1867a9d1915210121` |
+| `kagent-dev/substrate` (kagent's fork) | `v1.0.0`, commit `563df06f6be751c101539986896c17c55aa22a9d`: the release that kagent `v1.0.1` installs |
 | `nixpkgs` | `nixos-unstable`, locked in `flake.lock` |
 
 ## Patches
@@ -55,6 +59,7 @@ No upstream code is stored here. Each `pkgs/*.nix` file names an upstream commit
 | `patches/env/0003-free-slot-before-exit.patch` | env `56424de` | The guest frees a process slot before it reports the exit. Without it, upstream `TestConcurrencyLimiter` fails on a loaded machine. Proposed upstream as [agent-substrate/env#127](https://github.com/agent-substrate/env/pull/127); drop the patch when a pin includes it. |
 | `patches/env/0004-router-tls-rotation.patch` | env `56424de` | Reload the router trust bundle and client credentials on TLS handshakes. |
 | `patches/env/0005-resume-cut-process-streams.patch` | env `56424de` + PTY | Resume process output and stdin after router stream cuts. |
+| `patches/kagent/0001-accept-nix-store-path-images.patch` | kagent v1.0.1 | kagent's image check and three CRD patterns also accept `nix:/nix/store/...`. Written for this repository. |
 
 ## Update a pin
 
@@ -74,6 +79,16 @@ Nix fixes each download by hash. When a pin changes, you set a placeholder hash,
 3. Build again. `vendorHash` stays `null`: upstream commits its Go dependencies into the source tree.
 
 After a substrate update, run the local proof in [../kind/README.md](../kind/README.md) again. A build proves that the patch applies and that its unit tests pass. It does not prove that an actor boots.
+
+### kagent
+
+`pkgs/kagent.nix` has two pins that move together: kagent, and the release of its Substrate fork that this kagent installs (`substrateVersion`; it is the version in the `replace go.ate.dev/substrate => github.com/kagent-dev/substrate` line of kagent's `go/go.mod`).
+
+1. Set the new `rev` and `version` of kagent, and the new `rev` and `substrateVersion` of the fork. Set both `hash` values and `vendorHash` to `lib.fakeHash`.
+2. `nix build .#kagent .#kagent-substrate`, and copy each `got:` hash, as for env.
+3. `patches/kagent` is a plain diff: change it in a kagent checkout with `git apply`, then `git diff` over the file, and keep its text header. The pattern is in the Go check, in three kubebuilder markers and in three generated CRD files.
+
+A build proves that the patches apply to both sources and that the image check's unit test passes. Only the steps in [kagent.md](kagent.md) prove that an Agent boots.
 
 ## Change a patch
 
