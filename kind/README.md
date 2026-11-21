@@ -156,4 +156,4 @@ The upstream install also leaves an image tag `localhost:5001/envoy-dataplane:bu
 
 ## kagent
 
-`kagent.sh` and `kagent-agents.yaml.tmpl` belong to a second proof on the same kind of cluster: a [kagent](https://kagent.dev) agent that boots from a Nix image. [../docs/kagent.md](../docs/kagent.md) has its steps.
+`kagent.sh`, `kagent-agents.yaml.tmpl` and `kagent-sandbox.yaml.tmpl` belong to a second proof on the same kind of cluster: a [kagent](https://kagent.dev) agent and a kagent sandbox that boot from a Nix image. [../docs/kagent.md](../docs/kagent.md) has its steps.

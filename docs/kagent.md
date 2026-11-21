@@ -127,6 +127,43 @@ kagent agent invoke --session "$SESSION" --task "What was the first word of your
 
 The answer comes from an actor that Substrate restored from its snapshot.
 
+### 6. A sandbox on a Nix image
+
+A kagent sandbox is a place to run commands and keep files, with no agent and no model. You describe it with a `SandboxTemplate`. kagent starts its own guest program in every sandbox, from a separate OCI image that it mounts at `/run/kagent/guest`; the template's image supplies only the filesystem that your commands see.
+This step needs steps 1 to 3 and the port-forward of step 5. It needs no model.
+
+`kagent install` leaves the guest image unset, and no sandbox can start without it. Set it and restart the controller:
+
+```sh
+export SANDBOX_GUEST=ghcr.io/kagent-dev/kagent/sandbox-guest@sha256:16e84a2285119ce02cc6ba45ea7f68181eb1527335de85477614fb9a6b5ecf03   # the 1.0.1 release
+kubectl -n kagent get configmap kagent-controller -o json \
+  | jq --arg g "$SANDBOX_GUEST" '.data |= with_entries(.value |= sub("guestImage: \"\""; "guestImage: \"" + $g + "\""))' \
+  | kubectl apply -f -
+kubectl -n kagent rollout restart deployment/kagent-controller
+kubectl -n kagent rollout status deployment/kagent-controller
+```
+
+Create the two templates. The OCI one uses the guest image as its filesystem, only because that image has a shell and you already have its digest:
+
+```sh
+export SANDBOX_NIX_IMAGE="$KAGENT_ADK_IMAGE" SANDBOX_OCI_IMAGE="$SANDBOX_GUEST"
+envsubst < kind/kagent-sandbox.yaml.tmpl | kubectl apply -f -
+kubectl -n kagent wait sandboxtemplate/sandbox-nix sandboxtemplate/sandbox-oci --for=condition=Ready --timeout=5m
+```
+
+Start a sandbox from the Nix template, run a command in it, and see a file survive a suspend:
+
+```sh
+SANDBOX=$(kagent sandbox create sandbox-nix --request-id nix-1 -o json | jq -r .id)
+kagent sandbox exec "$SANDBOX" -- /bin/sh -c 'readlink -f /bin/bash; ls /nix/store | wc -l; echo hi > /data/workspace/f; touch /nix/store/x'
+kagent sandbox suspend "$SANDBOX"
+kagent sandbox resume "$SANDBOX"
+kagent sandbox exec "$SANDBOX" -- /bin/sh -c 'cat /data/workspace/f; readlink -f /bin/bash'
+kagent sandbox delete "$SANDBOX"
+```
+
+The first command prints a store path, the size of the image's closure, and a `Permission denied` for the write to the store.
+
 ### Teardown
 
 ```sh
@@ -138,7 +175,9 @@ rm -rf "$OUT" "$SUBSTRATE"
 
 ## What was seen
 
-Seen on 2026-11-21 on one machine: `x86_64` Linux, a single-node kind cluster, Kubernetes v1.37.0, gVisor workers, kagent `v1.0.1` on its Substrate fork `v1.0.0`. The steps above were run as written, with the four results of step 1. One thing differed: the model was `gpt-6-luna` behind a local OpenAI-compatible gateway, through a ModelConfig with a `baseUrl`, not `default-model-config`. Steps 1 to 4 took under 5 minutes with the Nix store and the Docker images already on the machine. Nobody has timed a first run.
+### Agents
+
+Seen on 2026-11-21 on one machine: `x86_64` Linux, a single-node kind cluster, Kubernetes v1.37.0, gVisor workers, kagent `v1.0.1` on its Substrate fork `v1.0.0`. The steps above were run as written, with the four results of step 1. One thing differed: the model was `gpt-6-luna` behind a local OpenAI-compatible gateway, through a ModelConfig with a `baseUrl`, not `default-model-config`. Steps 1 to 4 took under 5 minutes with the Nix store and the Docker images already on the machine. [The sandbox run](#sandboxes) timed a first run.
 
 | Claim | Evidence |
 | --- | --- |
@@ -151,9 +190,23 @@ Seen on 2026-11-21 on one machine: `x86_64` Linux, a single-node kind cluster, K
 
 Without a tool call, the answers about `/bin/bash` say nothing about the image. Asked "which directory does /bin/bash resolve to, else say unknown" three times each, the Nix-booted agent said `/usr/bin/bash` each time, which is wrong for its image, and the OCI agent said `/bin`, `/bin/bash` and `/usr/bin/bash`. An earlier run got `unknown` from the Nix-booted agent. These are guesses of the model.
 
+### Sandboxes
+
+Seen on 2026-11-21 on the same machine, on a second cluster built from a fresh clone of this repository with an empty Nix store. Steps 1 to 3 took 12 minutes 13 seconds, of which the build of step 1 took 7 minutes 31 seconds. Then step 6 ran, without steps 4 and 5. The template names were `sbx-nix` and `sbx-oci`.
+
+| Claim | Evidence |
+| --- | --- |
+| Without a guest image no sandbox template is prepared. | With `guestImage` unset, `sbx-nix` got `Ready=False`, reason `PreparationFailed`, and the controller logged `sandbox workload and guest images must be pinned by sha256 digest`. |
+| A SandboxTemplate on a store path is prepared. | After the guest image was set, `sbx-nix` (`nix:/nix/store/plmidxpanzskg6a2q01xfdszrany1b1q-kagent-adk-nix-image`) and `sbx-oci` both became `Ready`, reason `Prepared`. So kagent's OCI guest volume mounts into an actor whose root is a store path. |
+| Commands run inside the Nix image. | In a sandbox from `sbx-nix`, `readlink -f /bin/bash`, `id -u` and a count of `/nix/store` gave `/nix/store/lfm00fnq66xfgbn099vqckabyl5jllz6-bash-interactive-5.3p20/bin/bash`, `65532` and `23`. From `sbx-oci` they gave `/bin/bash`, `65532` and `0`. |
+| The sandbox cannot write to the store. | `touch /nix/store/x` gave `Permission denied` in the Nix sandbox. This is one write by an unprivileged user, not the checks of `kind/prove.sh`. |
+| Files move in and out. | `kagent sandbox upload` wrote a file under `/data/workspace`, and `kagent sandbox download` read back one that a command had written. |
+| Suspend and resume keep the files. | After `kagent sandbox suspend` the actor was `ACTOR_STATE_SUSPENDED` with no worker. After `resume`, both files were there, and `/bin/bash` and the store count were as before. |
+
 ### Not seen
 
-- A kagent `SandboxTemplate` on a Nix image. The patch lets the reference through; nobody started one.
+- A sandbox that an agent creates. The sandboxes above were created with `kagent sandbox create`.
+- A guest image from a Nix store path. The guest stayed kagent's OCI image.
 - The Claude and Codex harnesses of kagent, and a bring-your-own harness. Only the `kagent` harness type ran.
 - Agents with MCP tools, skills or other agents as tools. The agents above had a model, a prompt and the built-in tools.
 - kagent's `main` branch, which has moved to fork release `v1.1.0-alpha1`.
