@@ -99,6 +99,7 @@ These are not needed for the short path. Come back when a page uses one.
 | **ate-setup**, **kubectl-ate** | The Substrate installer, and the `kubectl` plugin that manages templates and actors (`kubectl ate ...`). Both are upstream programs. This repository builds patched versions of them. |
 | **System pods** | Substrate's own services on the cluster (API server, controller, router, atelet), as opposed to the actors that it runs for you. |
 | **OMP** | [Oh My Pi](https://github.com/can1357/oh-my-pi), an open-source coding agent that runs in a terminal. This repository packages it as an example of a real agent in a Nix image. |
+| **kagent** | [kagent](https://kagent.dev), an open-source agent framework for Kubernetes. Since its version 1.0 it runs each agent session as a Substrate actor, on its own fork of Substrate. [kagent.md](kagent.md) defines its terms (Agent, Harness, ModelConfig, Session) and starts one of its agents from a Nix image. |
 
 ## How the repository is built
 

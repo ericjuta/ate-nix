@@ -50,7 +50,7 @@ It depends on the feature.
 A few minutes for one package. One to two hours for everything from an empty store, because the registry-free bundle and the OMP image compile large programs. [getting-started.md](getting-started.md#time-and-disk) has the numbers.
 
 **Which versions does this work with?**
-Substrate v1.0.1 and env at commit `56424de`. [maintaining.md](maintaining.md) shows how to move to a newer release.
+Substrate v1.0.1 and env at commit `56424de`. [maintaining.md](maintaining.md) shows how to move to a newer release. The kagent proof used kagent v1.0.1 and its Substrate fork v1.0.0: see [kagent.md](kagent.md).
 
 **Where did the patches come from?**
 The PTY patch is by Samuel Huber, published as a gist, and rebased here. The Nix image patch was written for this repository after his idea of running Substrate actors from Nix store paths. It is not his code and he has not reviewed it.

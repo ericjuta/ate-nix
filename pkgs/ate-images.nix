@@ -18,11 +18,13 @@ let
     {
       package,
       binary,
+      # Image name below ate-nix/.
+      name ? binary,
       # uid:gid the container runs as. atelet's manifest pins root itself.
       user,
     }:
     dockerTools.buildLayeredImage {
-      name = "ate-nix/${binary}";
+      name = "ate-nix/${name}";
       tag = package.version;
 
       extraCommands = ''
@@ -48,6 +50,8 @@ let
     };
 in
 {
+  inherit mkImage;
+
   atelet = mkImage {
     package = ate-substrate;
     binary = "atelet";

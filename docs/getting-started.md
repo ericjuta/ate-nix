@@ -78,12 +78,15 @@ Use the store path that ends in `-ate-env-...`. The programs are statically link
 | `.#example-image` | A small Nix image: bash and coreutils. |
 | `.#proof-image` | The Nix image that the local proof starts: a small HTTP server. |
 | `.#omp-image` | A Nix image with the OMP coding agent and the env guest. Linux only. See [../examples/omp/README.md](../examples/omp/README.md). |
+| `.#kagent`, `.#kagent-substrate` | kagent v1.0.1 (controller and agent runtime) with `patches/kagent`, and `atelet` and `ateapi` of kagent's Substrate fork v1.0.0 with `patches/substrate`. Linux only. See [kagent.md](kagent.md). |
+| `.#kagent-adk-image` | A Nix image of kagent's agent runtime, for a kagent `Harness`. Linux only. |
+| `.#kagent-controller-image`, `.#kagent-atelet-image`, `.#kagent-ateapi-image` | Container images of those three patched binaries, as `docker load` tarballs. Linux only. |
 | `.#substrate-nix-bundle` | Every Substrate system pod, worker and demo actor as Nix closures, with the installer image map. Linux only. See [nix-images.md](nix-images.md#registry-free-substrate-system-pods). |
 | `.#substrate-image-map`, `.#substrate-image-map-check` | The image map alone, and the test that checks each entry of the built map. Linux only. |
 | `.#nix-snapshotter` | The pinned nix-snapshotter that the registry-free path uses. Linux only. |
 | `.#substrate-installer-tests`, `.#substrate-envoy-module-check` | Test-only outputs: the installer's test packages, and a load test of the Envoy module. Linux only. |
 
-[concepts.md](concepts.md#other-names-you-will-meet) defines OMP, image map and nix-snapshotter.
+[concepts.md](concepts.md#other-names-you-will-meet) defines OMP, kagent, image map and nix-snapshotter.
 
 ### Time and disk
 

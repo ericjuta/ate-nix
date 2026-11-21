@@ -153,3 +153,7 @@ rm -rf "$OUT" "$SUBSTRATE"
 
 If `docker volume rm` says that `ate-nix-store` is in use, a stopped container still holds it: `docker ps -a --filter volume=ate-nix-store` shows it, and `docker rm <id>` removes it.
 The upstream install also leaves an image tag `localhost:5001/envoy-dataplane:build-<number>` in your local Docker. `docker image ls 'localhost:5001/*'` shows it.
+
+## kagent
+
+`kagent.sh` and `kagent-agents.yaml.tmpl` belong to a second proof on the same kind of cluster: a [kagent](https://kagent.dev) agent that boots from a Nix image. [../docs/kagent.md](../docs/kagent.md) has its steps.
